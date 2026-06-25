@@ -1,0 +1,67 @@
+{
+  "src/lib.rs": {
+    "mtime": 1782352004.3362348,
+    "ast_hash": "39509cf039146569ee29873da19915d8",
+    "semantic_hash": ""
+  },
+  "src/main.rs": {
+    "mtime": 1782349353.0534232,
+    "ast_hash": "6bea082031838d6c3b99f0df7be4b09d",
+    "semantic_hash": ""
+  },
+  "AGENTS.md": {
+    "mtime": 1782350893.6413858,
+    "ast_hash": "bf106f3bdf79e2d54ab346edc4811fd6",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1782350893.6413858,
+    "ast_hash": "bf106f3bdf79e2d54ab346edc4811fd6",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1782356027.174406,
+    "ast_hash": "054f7ea58195452535f077632b820233",
+    "semantic_hash": ""
+  },
+  "docs/GRAPH_POLICY.md": {
+    "mtime": 1782350922.8857043,
+    "ast_hash": "05c57793d3ba06250d86a0b3b037309d",
+    "semantic_hash": ""
+  },
+  "docs/MCP_POLICY.md": {
+    "mtime": 1782350344.629078,
+    "ast_hash": "dafb34a289d8bafe9317874c650ecc69",
+    "semantic_hash": ""
+  },
+  "docs/PROGRESS.md": {
+    "mtime": 1782352026.284328,
+    "ast_hash": "a55cd39e990f6966f0fa9a0398b4fada",
+    "semantic_hash": ""
+  },
+  "docs/SCOPE.md": {
+    "mtime": 1782350344.624078,
+    "ast_hash": "1b9af407d7cb0817729994e6825c2991",
+    "semantic_hash": ""
+  },
+  "docs/SECURITY_POLICY.md": {
+    "mtime": 1782350344.634078,
+    "ast_hash": "1c3f34cb58eb6f3e4f2d9bb7e396f153",
+    "semantic_hash": ""
+  },
+  "docs/SKILL_POLICY.md": {
+    "mtime": 1782350344.631078,
+    "ast_hash": "a4a80f476be08a5a7dcfbf988b396423",
+    "semantic_hash": ""
+  },
+  ".codex/hooks.json": {
+    "mtime": 1782355919.4408891,
+    "ast_hash": "05935c0919496bb0c417d1d59d36442d",
+    "semantic_hash": ""
+  },
+  "docs/PRODUCT_HANDOFF.md": {
+    "mtime": 1782342211.298801,
+    "ast_hash": "bf2f87032b56c7e0d21f2592e7856f7a",
+    "semantic_hash": ""
+  }
+}
