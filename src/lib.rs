@@ -29,6 +29,7 @@ const EVENT_TYPES: &[&str] = &[
     "evidence.attached",
     "task.created",
     "task.updated",
+    "graph.imported",
 ];
 
 const SECRET_KEY_DENYLIST: &[&str] = &[
@@ -1012,6 +1013,16 @@ fn validate_event_payload(event_type: &str, payload: &Value) -> Result<()> {
                 required_nonempty_string(payload, "task_id")?;
             }
         }
+        "graph.imported" => {
+            required_nonempty_string(payload, "source")?;
+            required_nonempty_string(payload, "namespace")?;
+            if !payload.get("nodes").is_some_and(Value::is_array) {
+                bail!("graph.imported nodes must be an array");
+            }
+            if !payload.get("links").is_some_and(Value::is_array) {
+                bail!("graph.imported links must be an array");
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -1509,6 +1520,74 @@ permissions = ["read_repo"]
                     "evidence.attached",
                     "agent:test",
                     json!({"note": "missing"})
+                )
+                .is_err()
+        );
+        assert_eq!(meshlet.event_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_import_event_accepts_valid_payload() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "source_path": "graphify-out/graph.json",
+                "source_sha256": "abc123",
+                "nodes": [],
+                "links": []
+            }),
+        )?;
+
+        assert_eq!(meshlet.event_count()?, 2);
+        assert!(meshlet.verify_event_chain()?.ok);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_import_event_rejects_invalid_payload() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        assert!(
+            meshlet
+                .append_event(
+                    "graph.imported",
+                    "agent:test",
+                    json!({"namespace": "graphify:repo", "nodes": [], "links": []})
+                )
+                .is_err()
+        );
+        assert!(
+            meshlet
+                .append_event(
+                    "graph.imported",
+                    "agent:test",
+                    json!({"source": "graphify", "namespace": "", "nodes": [], "links": []})
+                )
+                .is_err()
+        );
+        assert!(
+            meshlet
+                .append_event(
+                    "graph.imported",
+                    "agent:test",
+                    json!({"source": "graphify", "namespace": "graphify:repo", "nodes": {}, "links": []})
+                )
+                .is_err()
+        );
+        assert!(
+            meshlet
+                .append_event(
+                    "graph.imported",
+                    "agent:test",
+                    json!({"source": "graphify", "namespace": "graphify:repo", "nodes": [], "links": {}})
                 )
                 .is_err()
         );

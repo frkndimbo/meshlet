@@ -4,12 +4,12 @@
 - cluster-only mode — file stats not available
 
 ## Summary
-- 226 nodes · 561 edges · 16 communities (15 shown, 1 thin omitted)
+- 228 nodes · 568 edges · 16 communities (15 shown, 1 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 6 edges (avg confidence: 0.82)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `e574409c`
+- Built from commit: `e8834dcd`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -32,7 +32,7 @@
 - [[_COMMUNITY_Community 15|Community 15]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `Result` - 81 edges
+1. `Result` - 83 edges
 2. `Meshlet` - 46 edges
 3. `Value` - 37 edges
 4. `Event` - 20 edges
@@ -65,12 +65,12 @@
 ## Communities (16 total, 1 thin omitted)
 
 ### Community 0 - "Community 0"
-Cohesion: 0.12
-Nodes (47): AsRef, Path, Row, Self, append_event_accepts_safe_payload_keys(), append_event_chains_hashes(), append_event_rejects_secret_key_names(), canonical_json() (+39 more)
+Cohesion: 0.11
+Nodes (47): AsRef, Path, Row, Self, append_event_accepts_safe_payload_keys(), append_event_chains_hashes(), append_event_rejects_secret_key_names(), edge_from_row() (+39 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.12
-Nodes (16): Connection, Map, Option, Bounded, clamp_limit(), Event, find_secret_key(), merge_task_payload() (+8 more)
+Nodes (18): Connection, Map, Option, Bounded, canonical_json(), clamp_limit(), Event, event_hash() (+10 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.09
@@ -133,16 +133,16 @@ Nodes (4): Manifest, Permissions, Registry Rules, Skill Policy
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `Result` connect `Community 0` to `Community 1`, `Community 3`, `Community 4`?**
-  _High betweenness centrality (0.118) - this node is a cross-community bridge._
+  _High betweenness centrality (0.121) - this node is a cross-community bridge._
 - **Why does `Meshlet` connect `Community 1` to `Community 0`, `Community 3`?**
-  _High betweenness centrality (0.067) - this node is a cross-community bridge._
+  _High betweenness centrality (0.066) - this node is a cross-community bridge._
 - **Why does `mcp_request()` connect `Community 0` to `Community 1`, `Community 4`?**
   _High betweenness centrality (0.034) - this node is a cross-community bridge._
 - **What connects `Connection`, `T`, `Map` to the rest of the system?**
   _78 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
-  _Cohesion score 0.11688311688311688 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.11403508771929824 - nodes in this community are weakly interconnected._
 - **Should `Community 1` be split into smaller, more focused modules?**
-  _Cohesion score 0.12408163265306123 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.1223529411764706 - nodes in this community are weakly interconnected._
 - **Should `Community 2` be split into smaller, more focused modules?**
   _Cohesion score 0.09090909090909091 - nodes in this community are weakly interconnected._
