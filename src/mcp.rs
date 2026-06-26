@@ -103,8 +103,9 @@ fn mcp_tool_call(meshlet: &Meshlet, params: &Value) -> Result<Value> {
         "meshlet_query" => {
             let q = str_field(&args, "q")?;
             let kind = args.get("kind").and_then(Value::as_str);
+            let namespace = optional_string_field(&args, "namespace")?;
             let limit = limit_arg(&args)?;
-            meshlet.query(q, kind, limit)?
+            meshlet.query_scoped(q, kind, namespace, limit)?
         }
         "meshlet_list_skills" => json!({ "skills": meshlet.list_skills()? }),
         "meshlet_list_tasks" => json!({ "tasks": meshlet.list_tasks(limit_arg(&args)?)? }),
@@ -140,6 +141,9 @@ fn mcp_read_resource(meshlet: &Meshlet, uri: &str) -> Result<Value> {
         "meshlet://evidence/recent" => json!({
             "limit": DEFAULT_LIMIT,
             "evidence": meshlet.list_evidence(DEFAULT_LIMIT)?,
+        }),
+        "meshlet://graph/namespaces" => json!({
+            "namespaces": meshlet.graph_namespaces()?,
         }),
         "meshlet://graph" => {
             let nodes = meshlet.graph_nodes_bounded(None, DEFAULT_LIMIT)?;
@@ -216,6 +220,7 @@ fn mcp_tools() -> Value {
                 "properties": {
                     "q": { "type": "string" },
                     "kind": { "type": "string", "enum": ["all", "events", "nodes", "edges"] },
+                    "namespace": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
                 },
                 "required": ["q"]
@@ -261,6 +266,12 @@ fn mcp_resources() -> Value {
             "mimeType": "application/json"
         },
         {
+            "uri": "meshlet://graph/namespaces",
+            "name": "Meshlet Graph Namespaces",
+            "description": "Known graph namespaces.",
+            "mimeType": "application/json"
+        },
+        {
             "uri": "meshlet://graph",
             "name": "Meshlet Graph",
             "description": "Materialized context graph.",
@@ -295,6 +306,16 @@ fn limit_arg(value: &Value) -> Result<u32> {
         bail!("limit must be a positive integer");
     }
     Ok(clamp_limit(u32::try_from(limit).unwrap_or(MAX_LIMIT)))
+}
+
+fn optional_string_field<'a>(value: &'a Value, key: &str) -> Result<Option<&'a str>> {
+    match value.get(key) {
+        Some(raw) => raw
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| anyhow!("{key} must be a string")),
+        None => Ok(None),
+    }
 }
 
 fn clamp_limit(limit: u32) -> u32 {

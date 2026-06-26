@@ -2126,6 +2126,7 @@ description = "Review Rust code through MCP."
         assert!(uris.contains(&"meshlet://events/recent"));
         assert!(uris.contains(&"meshlet://tasks"));
         assert!(uris.contains(&"meshlet://evidence/recent"));
+        assert!(uris.contains(&"meshlet://graph/namespaces"));
         assert!(uris.contains(&"meshlet://graph"));
         Ok(())
     }
@@ -2196,6 +2197,71 @@ description = "Review Rust code through resources."
         );
         let value: Value = serde_json::from_str(mcp_resource_text(&resource))?;
         assert_eq!(value["tasks"][0]["id"], "mcp-task");
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_graph_namespaces_resource_returns_namespaces() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "a", "label": "A"}],
+                "links": []
+            }),
+        )?;
+
+        let response = mcp_request(
+            &meshlet,
+            "resources/read",
+            json!({ "uri": "meshlet://graph/namespaces" }),
+        );
+        let value: Value = serde_json::from_str(mcp_resource_text(&response))?;
+
+        assert_eq!(value["namespaces"][0], "graphify:repo");
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_query_accepts_namespace_and_rejects_invalid_namespace() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "a", "label": "Needle"}],
+                "links": []
+            }),
+        )?;
+
+        let scoped = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({
+                "name": "meshlet_query",
+                "arguments": { "q": "Needle", "kind": "nodes", "namespace": "graphify:repo" }
+            }),
+        );
+        let value: Value = serde_json::from_str(mcp_content_text(&scoped))?;
+        assert_eq!(value["namespace"], "graphify:repo");
+        assert_eq!(value["nodes"]["items"].as_array().expect("nodes").len(), 1);
+
+        let invalid = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({
+                "name": "meshlet_query",
+                "arguments": { "q": "Needle", "namespace": 1 }
+            }),
+        );
+        assert_eq!(invalid["error"]["code"], -32602);
         Ok(())
     }
 

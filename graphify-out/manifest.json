@@ -1,7 +1,7 @@
 {
   "src/lib.rs": {
-    "mtime": 1782442400.397421,
-    "ast_hash": "d7f843a739b3e33f037c6d59a709eb23",
+    "mtime": 1782442528.8695676,
+    "ast_hash": "1adaaef8b24a26bec37448fd1e20824e",
     "semantic_hash": ""
   },
   "src/main.rs": {
@@ -65,13 +65,13 @@
     "semantic_hash": ""
   },
   "src/mcp.rs": {
-    "mtime": 1782441501.0925128,
-    "ast_hash": "c0f51925e0975f46744122ffd5bfa7b5",
+    "mtime": 1782442567.6894135,
+    "ast_hash": "93af12a4a1ed517042da178aa6d4307a",
     "semantic_hash": ""
   },
   "task.md": {
-    "mtime": 1782442202.2195904,
-    "ast_hash": "1a67354423138bbd729f76f6bb6ea0d3",
+    "mtime": 1782442506.8880687,
+    "ast_hash": "543325652a8f5bc4059aedec8f3d6a67",
     "semantic_hash": ""
   }
 }
