@@ -4,12 +4,12 @@
 - cluster-only mode — file stats not available
 
 ## Summary
-- 245 nodes · 650 edges · 19 communities (18 shown, 1 thin omitted)
+- 249 nodes · 673 edges · 19 communities (18 shown, 1 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 6 edges (avg confidence: 0.82)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `34ea4738`
+- Built from commit: `98a9f02c`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -35,11 +35,11 @@
 - [[_COMMUNITY_Community 18|Community 18]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `Result` - 95 edges
-2. `Meshlet` - 50 edges
-3. `Value` - 39 edges
+1. `Result` - 99 edges
+2. `Meshlet` - 52 edges
+3. `Value` - 41 edges
 4. `Event` - 21 edges
-5. `Option` - 19 edges
+5. `Option` - 20 edges
 6. `mcp_request()` - 18 edges
 7. `Meshlet New Chat Handoff` - 16 edges
 8. `String` - 13 edges
@@ -68,20 +68,20 @@
 ## Communities (19 total, 1 thin omitted)
 
 ### Community 0 - "Community 0"
-Cohesion: 0.12
-Nodes (49): Row, append_event_accepts_safe_payload_keys(), append_event_chains_hashes(), append_event_rejects_secret_key_names(), canonical_json(), edge_from_row(), event_from_row(), event_hash() (+41 more)
+Cohesion: 0.13
+Nodes (48): Row, append_event_accepts_safe_payload_keys(), append_event_chains_hashes(), append_event_rejects_secret_key_names(), edge_from_row(), event_from_row(), event_record_from_row(), EventRecord (+40 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.17
-Nodes (10): Connection, Bounded, clamp_limit(), graph_rebuild_preserves_imported_graph(), Meshlet, Option, Value, SkillManifest (+2 more)
+Nodes (14): Map, Bounded, clamp_limit(), find_secret_key(), merge_task_payload(), nonempty_string(), required_nonempty_string(), Option (+6 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.09
 Nodes (21): Batasan Penting, Contoh CLI Target, Event Awal, Filosofi Produk, Inti Ide, Kenapa Ini Relevan, Keputusan Saat Ini, Later (+13 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.19
-Nodes (11): Map, Event, find_secret_key(), graph_import_edge_kind(), imported_node_id(), merge_task_payload(), namespace_json_fragment(), normalize_key() (+3 more)
+Cohesion: 0.27
+Nodes (5): Connection, Event, graph_import_edge_kind(), Meshlet, str_field()
 
 ### Community 4 - "Community 4"
 Cohesion: 0.30
@@ -92,52 +92,52 @@ Cohesion: 0.16
 Nodes (15): Command, PathBuf, Serialize, find_project_root(), parse_json_arg(), Cli, Command, EventCommand (+7 more)
 
 ### Community 6 - "Community 6"
+Cohesion: 0.22
+Nodes (6): AsRef, Path, Self, evidence_attach_auto_sha256_and_verify_passes(), evidence_verify_fails_for_changed_or_missing_file(), sha256_hex()
+
+### Community 7 - "Community 7"
 Cohesion: 0.17
 Nodes (11): Agent Instructions, Architecture Rules, Commands, Git, Graphify, Optimization, Product Scope, Progressive Docs (+3 more)
 
-### Community 7 - "Community 7"
+### Community 8 - "Community 8"
 Cohesion: 0.22
 Nodes (8): Commands, Core Flow, Current Features, Docs, Meshlet, Not Doing Yet, v0.1 Scope, Verification
-
-### Community 8 - "Community 8"
-Cohesion: 0.29
-Nodes (4): AsRef, Path, Self, sha256_hex()
 
 ### Community 9 - "Community 9"
 Cohesion: 0.40
 Nodes (5): Meshlet CLI, Meshlet Core, MCP Stdio Server, SQLite Backend, Ponytail Simplicity Check
 
 ### Community 10 - "Community 10"
-Cohesion: 0.25
-Nodes (7): Current Phase, Current State, Deprecated / Superseded, Last Verified, Maintenance Rules, Meshlet Progress, Next 3 Tasks
+Cohesion: 0.28
+Nodes (6): canonical_json(), event_hash(), imported_node_id(), normalize_key(), VerificationReport, String
 
 ### Community 11 - "Community 11"
 Cohesion: 0.67
 Nodes (3): Context Graph, Event Log, Skill Registry
 
 ### Community 12 - "Community 12"
-Cohesion: 0.33
-Nodes (5): Explicitly Out of Scope for v0.1, Meshlet Scope, Phase Gate, Product Line, v0.1 Active Scope
+Cohesion: 0.25
+Nodes (7): Current Phase, Current State, Deprecated / Superseded, Last Verified, Maintenance Rules, Meshlet Progress, Next 3 Tasks
 
 ### Community 13 - "Community 13"
 Cohesion: 0.33
-Nodes (5): Future Remote Mode, Local State, Secrets, Security Policy, Tool Safety
+Nodes (5): Explicitly Out of Scope for v0.1, Meshlet Scope, Phase Gate, Product Line, v0.1 Active Scope
 
 ### Community 14 - "Community 14"
-Cohesion: 0.40
-Nodes (4): Graph Policy, Graphify Policy, Node and Edge Rules, Source of Truth
+Cohesion: 0.33
+Nodes (5): Future Remote Mode, Local State, Secrets, Security Policy, Tool Safety
 
 ### Community 15 - "Community 15"
 Cohesion: 0.40
-Nodes (4): MCP Policy, Resources, Tools, v0.1 Transport
+Nodes (4): Graph Policy, Graphify Policy, Node and Edge Rules, Source of Truth
 
 ### Community 16 - "Community 16"
 Cohesion: 0.40
-Nodes (4): Manifest, Permissions, Registry Rules, Skill Policy
+Nodes (4): MCP Policy, Resources, Tools, v0.1 Transport
 
 ### Community 17 - "Community 17"
-Cohesion: 1.00
-Nodes (3): nonempty_string(), required_nonempty_string(), validate_event_payload()
+Cohesion: 0.40
+Nodes (4): Manifest, Permissions, Registry Rules, Skill Policy
 
 ## Knowledge Gaps
 - **79 isolated node(s):** `Connection`, `T`, `Map`, `Command`, `Command` (+74 more)
@@ -147,15 +147,15 @@ Nodes (3): nonempty_string(), required_nonempty_string(), validate_event_payload
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Result` connect `Community 0` to `Community 1`, `Community 3`, `Community 5`, `Community 8`, `Community 17`?**
-  _High betweenness centrality (0.135) - this node is a cross-community bridge._
-- **Why does `Meshlet` connect `Community 1` to `Community 0`, `Community 8`, `Community 3`, `Community 5`?**
+- **Why does `Result` connect `Community 0` to `Community 1`, `Community 3`, `Community 5`, `Community 6`, `Community 10`?**
+  _High betweenness centrality (0.140) - this node is a cross-community bridge._
+- **Why does `Meshlet` connect `Community 3` to `Community 0`, `Community 1`, `Community 5`, `Community 6`, `Community 10`?**
   _High betweenness centrality (0.066) - this node is a cross-community bridge._
 - **Why does `str_field()` connect `Community 3` to `Community 0`, `Community 1`, `Community 4`?**
   _High betweenness centrality (0.035) - this node is a cross-community bridge._
 - **What connects `Connection`, `T`, `Map` to the rest of the system?**
   _79 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
-  _Cohesion score 0.12467532467532468 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.12525252525252525 - nodes in this community are weakly interconnected._
 - **Should `Community 2` be split into smaller, more focused modules?**
   _Cohesion score 0.09090909090909091 - nodes in this community are weakly interconnected._

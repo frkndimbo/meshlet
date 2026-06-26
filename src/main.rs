@@ -119,6 +119,17 @@ enum TaskCommand {
 
 #[derive(Debug, Subcommand)]
 enum EvidenceCommand {
+    Attach {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long)]
+        sha256: Option<String>,
+    },
+    Verify {
+        id: String,
+    },
     List {
         #[arg(long, default_value_t = DEFAULT_LIMIT)]
         limit: u32,
@@ -232,6 +243,16 @@ fn main() -> Result<()> {
             let root = find_project_root()?;
             let meshlet = Meshlet::open(&root)?;
             match command {
+                EvidenceCommand::Attach {
+                    path,
+                    task_id,
+                    sha256,
+                } => print_json(&meshlet.attach_evidence_file(
+                    path,
+                    task_id.as_deref(),
+                    sha256.as_deref(),
+                )?)?,
+                EvidenceCommand::Verify { id } => print_json(&meshlet.verify_evidence(&id)?)?,
                 EvidenceCommand::List { limit } => print_json(&meshlet.list_evidence(limit)?)?,
                 EvidenceCommand::Show { id } => print_json(&meshlet.show_evidence(&id)?)?,
             }
