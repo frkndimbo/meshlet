@@ -13,9 +13,12 @@ Agent -> MCP -> Meshlet -> Event Log -> Context Graph -> Skill Registry
 ## Current Features
 
 - Append-only local event log with hash chaining.
+- Event hash-chain verification.
 - SQLite-backed local project state in `.meshlet/`.
 - Rebuildable graph nodes and edges derived from events.
+- Deterministic event/graph query.
 - Skill manifest registration from TOML.
+- Task and evidence views for agent work journals.
 - MCP stdio server exposing Meshlet tools and resources.
 
 ## Commands
@@ -23,10 +26,14 @@ Agent -> MCP -> Meshlet -> Event Log -> Context Graph -> Skill Registry
 ```bash
 rtk cargo run -- init
 rtk cargo run -- status
-rtk cargo run -- event append --type context.added --json {label:repo context}
+rtk cargo run -- verify
+rtk cargo run -- event append --type context.added --json '{"label":"repo context"}'
 rtk cargo run -- event list
-rtk cargo run -- graph nodes
+rtk cargo run -- query "repo context" --kind all --limit 20
+rtk cargo run -- graph nodes --limit 20
 rtk cargo run -- skill add ./skill.toml
+rtk cargo run -- task list
+rtk cargo run -- evidence list
 rtk cargo run -- serve --mcp stdio
 ```
 

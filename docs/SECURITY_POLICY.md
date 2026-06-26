@@ -6,6 +6,8 @@
 - Do not store secrets in graph attrs.
 - Do not store secrets in docs, tests, logs, or examples.
 - Use placeholder names for sensitive variables.
+- Event append rejects payload keys that normalize to sensitive names such as `password`, `secret`, `api_key`, `authorization`, `access_token`, `refresh_token`, or `private_key`.
+- Secret rejection errors may name the offending key path, but must never print the value.
 
 ## Local State
 

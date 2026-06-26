@@ -1,6 +1,7 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{SecondsFormat, Utc};
@@ -12,6 +13,8 @@ use uuid::Uuid;
 
 pub const DB_DIR: &str = ".meshlet";
 pub const DB_FILE: &str = "meshlet.db";
+pub const DEFAULT_LIMIT: u32 = 20;
+pub const MAX_LIMIT: u32 = 100;
 
 const EVENT_TYPES: &[&str] = &[
     "repo.initialized",
@@ -23,6 +26,19 @@ const EVENT_TYPES: &[&str] = &[
     "task.updated",
 ];
 
+const SECRET_KEY_DENYLIST: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "apikey",
+    "authorization",
+    "accesstoken",
+    "refreshtoken",
+    "privatekey",
+];
+
+const ALLOWED_SKILL_PERMISSIONS: &[&str] = &["read_repo", "read_files", "write_docs", "run_check"];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Event {
     pub id: String,
@@ -33,6 +49,15 @@ pub struct Event {
     pub payload: Value,
     pub hash: String,
     pub prev_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationReport {
+    pub ok: bool,
+    pub events: u64,
+    pub checked_until_seq: i64,
+    pub first_invalid_seq: Option<i64>,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,6 +75,11 @@ pub struct SkillManifest {
 pub struct Meshlet {
     root: PathBuf,
     conn: Connection,
+}
+
+struct Bounded<T> {
+    items: Vec<T>,
+    truncated: bool,
 }
 
 impl Meshlet {
@@ -145,11 +175,64 @@ impl Meshlet {
         Ok(count)
     }
 
+    pub fn verify_event_chain(&self) -> Result<VerificationReport> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, id, type, created_at, actor, payload_json, hash, prev_hash
+             FROM events ORDER BY seq ASC",
+        )?;
+        let rows = stmt
+            .query_map([], event_record_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut expected_prev_hash: Option<String> = None;
+        let mut checked_until_seq = 0;
+
+        for record in &rows {
+            checked_until_seq = record.seq;
+            if record.event.prev_hash != expected_prev_hash {
+                return Ok(VerificationReport {
+                    ok: false,
+                    events: rows.len() as u64,
+                    checked_until_seq,
+                    first_invalid_seq: Some(record.seq),
+                    reason: Some("prev_hash_mismatch".to_string()),
+                });
+            }
+            let expected_hash = event_hash(
+                &record.event.id,
+                &record.event.event_type,
+                &record.event.created_at,
+                &record.event.actor,
+                &record.event.payload,
+                record.event.prev_hash.as_deref(),
+            )?;
+            if record.event.hash != expected_hash {
+                return Ok(VerificationReport {
+                    ok: false,
+                    events: rows.len() as u64,
+                    checked_until_seq,
+                    first_invalid_seq: Some(record.seq),
+                    reason: Some("hash_mismatch".to_string()),
+                });
+            }
+            expected_prev_hash = Some(record.event.hash.clone());
+        }
+
+        Ok(VerificationReport {
+            ok: true,
+            events: rows.len() as u64,
+            checked_until_seq,
+            first_invalid_seq: None,
+            reason: None,
+        })
+    }
+
     pub fn append_event(&self, event_type: &str, actor: &str, payload: Value) -> Result<Event> {
         validate_event_type(event_type)?;
         if actor.trim().is_empty() {
             bail!("actor must not be empty");
         }
+        validate_no_secret_keys(&payload)?;
+        validate_event_payload(event_type, &payload)?;
         let prev_hash = self.latest_hash()?;
         let id = Uuid::new_v4().to_string();
         let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -184,6 +267,7 @@ impl Meshlet {
     }
 
     pub fn list_events(&self, limit: u32) -> Result<Vec<Event>> {
+        let limit = clamp_limit(limit);
         let mut stmt = self.conn.prepare(
             "SELECT id, type, created_at, actor, payload_json, hash, prev_hash
              FROM events ORDER BY seq DESC LIMIT ?1",
@@ -192,6 +276,23 @@ impl Meshlet {
             .query_map([limit], event_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(events)
+    }
+
+    fn list_events_bounded(&self, limit: u32) -> Result<Bounded<Event>> {
+        let limit = clamp_limit(limit);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, type, created_at, actor, payload_json, hash, prev_hash
+             FROM events ORDER BY seq DESC LIMIT ?1",
+        )?;
+        let mut events = stmt
+            .query_map([limit + 1], event_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = events.len() > limit as usize;
+        events.truncate(limit as usize);
+        Ok(Bounded {
+            items: events,
+            truncated,
+        })
     }
 
     pub fn show_event(&self, id: &str) -> Result<Event> {
@@ -269,6 +370,41 @@ impl Meshlet {
             .ok_or_else(|| anyhow!("skill not found: {name}"))
     }
 
+    pub fn list_tasks(&self, limit: u32) -> Result<Vec<Value>> {
+        let limit = clamp_limit(limit) as usize;
+        let mut tasks = self.task_views()?;
+        tasks.truncate(limit);
+        Ok(tasks)
+    }
+
+    pub fn show_task(&self, id: &str) -> Result<Value> {
+        self.task_views()?
+            .into_iter()
+            .find(|task| task["id"] == id)
+            .ok_or_else(|| anyhow!("task not found: {id}"))
+    }
+
+    pub fn list_evidence(&self, limit: u32) -> Result<Vec<Value>> {
+        self.graph_nodes_limited(Some("evidence"), limit)
+    }
+
+    pub fn show_evidence(&self, id: &str) -> Result<Value> {
+        let node_id = if id.starts_with("evidence:") {
+            id.to_string()
+        } else {
+            format!("evidence:{id}")
+        };
+        self.conn
+            .query_row(
+                "SELECT id, kind, label, attrs_json, source_event_id
+                 FROM graph_nodes WHERE id = ?1 AND kind = 'evidence'",
+                [node_id.as_str()],
+                node_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("evidence not found: {id}"))
+    }
+
     pub fn rebuild_graph(&self) -> Result<()> {
         self.conn.execute("DELETE FROM graph_edges", [])?;
         self.conn.execute("DELETE FROM graph_nodes", [])?;
@@ -281,51 +417,246 @@ impl Meshlet {
     }
 
     pub fn graph_nodes(&self, kind: Option<&str>) -> Result<Vec<Value>> {
+        Ok(self.graph_nodes_bounded(kind, DEFAULT_LIMIT)?.items)
+    }
+
+    pub fn graph_nodes_limited(&self, kind: Option<&str>, limit: u32) -> Result<Vec<Value>> {
+        Ok(self.graph_nodes_bounded(kind, limit)?.items)
+    }
+
+    fn graph_nodes_bounded(&self, kind: Option<&str>, limit: u32) -> Result<Bounded<Value>> {
+        let limit = clamp_limit(limit);
         let (sql, params_value): (&str, Vec<String>) = match kind {
             Some(kind) => (
-                "SELECT id, kind, label, attrs_json, source_event_id FROM graph_nodes WHERE kind = ?1 ORDER BY id",
-                vec![kind.to_string()],
+                "SELECT id, kind, label, attrs_json, source_event_id FROM graph_nodes WHERE kind = ?1 ORDER BY id LIMIT ?2",
+                vec![kind.to_string(), (limit + 1).to_string()],
             ),
             None => (
-                "SELECT id, kind, label, attrs_json, source_event_id FROM graph_nodes ORDER BY id",
-                vec![],
+                "SELECT id, kind, label, attrs_json, source_event_id FROM graph_nodes ORDER BY id LIMIT ?1",
+                vec![(limit + 1).to_string()],
             ),
         };
         let mut stmt = self.conn.prepare(sql)?;
-        let nodes = stmt
+        let mut nodes = stmt
             .query_map(rusqlite::params_from_iter(params_value), node_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(nodes)
+        let truncated = nodes.len() > limit as usize;
+        nodes.truncate(limit as usize);
+        Ok(Bounded {
+            items: nodes,
+            truncated,
+        })
     }
 
     pub fn graph_edges(&self, from_id: Option<&str>) -> Result<Vec<Value>> {
+        Ok(self.graph_edges_bounded(from_id, DEFAULT_LIMIT)?.items)
+    }
+
+    pub fn graph_edges_limited(&self, from_id: Option<&str>, limit: u32) -> Result<Vec<Value>> {
+        Ok(self.graph_edges_bounded(from_id, limit)?.items)
+    }
+
+    fn graph_edges_bounded(&self, from_id: Option<&str>, limit: u32) -> Result<Bounded<Value>> {
+        let limit = clamp_limit(limit);
         let (sql, params_value): (&str, Vec<String>) = match from_id {
             Some(from_id) => (
-                "SELECT id, from_id, to_id, kind, attrs_json, source_event_id FROM graph_edges WHERE from_id = ?1 ORDER BY id",
-                vec![from_id.to_string()],
+                "SELECT id, from_id, to_id, kind, attrs_json, source_event_id FROM graph_edges WHERE from_id = ?1 ORDER BY id LIMIT ?2",
+                vec![from_id.to_string(), (limit + 1).to_string()],
             ),
             None => (
-                "SELECT id, from_id, to_id, kind, attrs_json, source_event_id FROM graph_edges ORDER BY id",
-                vec![],
+                "SELECT id, from_id, to_id, kind, attrs_json, source_event_id FROM graph_edges ORDER BY id LIMIT ?1",
+                vec![(limit + 1).to_string()],
             ),
         };
         let mut stmt = self.conn.prepare(sql)?;
-        let edges = stmt
+        let mut edges = stmt
             .query_map(rusqlite::params_from_iter(params_value), edge_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(edges)
+        let truncated = edges.len() > limit as usize;
+        edges.truncate(limit as usize);
+        Ok(Bounded {
+            items: edges,
+            truncated,
+        })
     }
 
     pub fn context_snapshot(&self) -> Result<Value> {
+        self.context_snapshot_limited(DEFAULT_LIMIT)
+    }
+
+    pub fn context_snapshot_limited(&self, limit: u32) -> Result<Value> {
+        let limit = clamp_limit(limit);
+        let events = self.list_events_bounded(limit)?;
+        let nodes = self.graph_nodes_bounded(None, limit)?;
+        let edges = self.graph_edges_bounded(None, limit)?;
         Ok(json!({
             "root": self.root.display().to_string(),
-            "events_recent": self.list_events(20)?,
+            "limit": limit,
+            "events_recent": {
+                "items": events.items,
+                "truncated": events.truncated,
+            },
             "skills": self.list_skills()?,
+            "tasks": self.list_tasks(limit)?,
+            "evidence": self.list_evidence(limit)?,
             "graph": {
-                "nodes": self.graph_nodes(None)?,
-                "edges": self.graph_edges(None)?,
+                "nodes": {
+                    "items": nodes.items,
+                    "truncated": nodes.truncated,
+                },
+                "edges": {
+                    "items": edges.items,
+                    "truncated": edges.truncated,
+                },
             }
         }))
+    }
+
+    pub fn query(&self, q: &str, kind: Option<&str>, limit: u32) -> Result<Value> {
+        let needle = q.trim().to_lowercase();
+        if needle.is_empty() {
+            bail!("query must not be empty");
+        }
+        let kind = kind.unwrap_or("all");
+        if !matches!(kind, "all" | "events" | "nodes" | "edges") {
+            bail!("query kind must be all, events, nodes, or edges");
+        }
+        let limit = clamp_limit(limit);
+        let events = if matches!(kind, "all" | "events") {
+            Some(self.query_events(&needle, limit)?)
+        } else {
+            None
+        };
+        let nodes = if matches!(kind, "all" | "nodes") {
+            Some(self.query_nodes(&needle, limit)?)
+        } else {
+            None
+        };
+        let edges = if matches!(kind, "all" | "edges") {
+            Some(self.query_edges(&needle, limit)?)
+        } else {
+            None
+        };
+
+        Ok(json!({
+            "q": q,
+            "kind": kind,
+            "limit": limit,
+            "events": events.map(|bounded| json!({
+                "items": bounded.items,
+                "truncated": bounded.truncated,
+            })),
+            "nodes": nodes.map(|bounded| json!({
+                "items": bounded.items,
+                "truncated": bounded.truncated,
+            })),
+            "edges": edges.map(|bounded| json!({
+                "items": bounded.items,
+                "truncated": bounded.truncated,
+            })),
+        }))
+    }
+
+    fn query_events(&self, needle: &str, limit: u32) -> Result<Bounded<Event>> {
+        let limit = clamp_limit(limit);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, type, created_at, actor, payload_json, hash, prev_hash
+             FROM events
+             WHERE instr(lower(type), ?1) > 0
+                OR instr(lower(actor), ?1) > 0
+                OR instr(lower(payload_json), ?1) > 0
+             ORDER BY seq DESC
+             LIMIT ?2",
+        )?;
+        let mut events = stmt
+            .query_map(params![needle, limit + 1], event_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = events.len() > limit as usize;
+        events.truncate(limit as usize);
+        Ok(Bounded {
+            items: events,
+            truncated,
+        })
+    }
+
+    fn query_nodes(&self, needle: &str, limit: u32) -> Result<Bounded<Value>> {
+        let limit = clamp_limit(limit);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, label, attrs_json, source_event_id
+             FROM graph_nodes
+             WHERE instr(lower(id), ?1) > 0
+                OR instr(lower(kind), ?1) > 0
+                OR instr(lower(coalesce(label, '')), ?1) > 0
+                OR instr(lower(attrs_json), ?1) > 0
+             ORDER BY id
+             LIMIT ?2",
+        )?;
+        let mut nodes = stmt
+            .query_map(params![needle, limit + 1], node_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = nodes.len() > limit as usize;
+        nodes.truncate(limit as usize);
+        Ok(Bounded {
+            items: nodes,
+            truncated,
+        })
+    }
+
+    fn query_edges(&self, needle: &str, limit: u32) -> Result<Bounded<Value>> {
+        let limit = clamp_limit(limit);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_id, to_id, kind, attrs_json, source_event_id
+             FROM graph_edges
+             WHERE instr(lower(id), ?1) > 0
+                OR instr(lower(from_id), ?1) > 0
+                OR instr(lower(to_id), ?1) > 0
+                OR instr(lower(kind), ?1) > 0
+                OR instr(lower(attrs_json), ?1) > 0
+             ORDER BY id
+             LIMIT ?2",
+        )?;
+        let mut edges = stmt
+            .query_map(params![needle, limit + 1], edge_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = edges.len() > limit as usize;
+        edges.truncate(limit as usize);
+        Ok(Bounded {
+            items: edges,
+            truncated,
+        })
+    }
+
+    fn task_views(&self) -> Result<Vec<Value>> {
+        let mut tasks: BTreeMap<String, serde_json::Map<String, Value>> = BTreeMap::new();
+        for event in self.events_ascending()? {
+            match event.event_type.as_str() {
+                "task.created" => {
+                    let id = event
+                        .payload
+                        .get("task_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&event.id)
+                        .to_string();
+                    let task = tasks.entry(id.clone()).or_default();
+                    task.entry("id").or_insert_with(|| json!(id));
+                    task.entry("created_event_id")
+                        .or_insert_with(|| json!(event.id.clone()));
+                    task.entry("created_at")
+                        .or_insert_with(|| json!(event.created_at.clone()));
+                    merge_task_payload(task, &event);
+                }
+                "task.updated" => {
+                    let Some(id) = event.payload.get("task_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let task = tasks.entry(id.to_string()).or_default();
+                    task.entry("id").or_insert_with(|| json!(id));
+                    merge_task_payload(task, &event);
+                }
+                _ => {}
+            }
+        }
+        Ok(tasks.into_values().map(Value::Object).collect())
     }
 
     fn next_seq(&self) -> Result<i64> {
@@ -527,6 +858,16 @@ impl Meshlet {
             json!({}),
             &event.id,
         )?;
+        if let Some(task_id) = event.payload.get("task_id").and_then(Value::as_str) {
+            self.upsert_edge(
+                &format!("edge:{}:evidence-task", event.id),
+                &evidence_id,
+                &format!("task:{task_id}"),
+                "supports",
+                json!({}),
+                &event.id,
+            )?;
+        }
         Ok(())
     }
 
@@ -704,8 +1045,19 @@ fn mcp_tool_call(meshlet: &Meshlet, params: &Value) -> Result<Value> {
                 .ok_or_else(|| anyhow!("payload object is required"))?;
             serde_json::to_value(meshlet.append_event(event_type, actor, payload)?)?
         }
+        "meshlet_query" => {
+            let q = str_field(&args, "q")?;
+            let kind = args.get("kind").and_then(Value::as_str);
+            let limit = limit_arg(&args)?;
+            meshlet.query(q, kind, limit)?
+        }
         "meshlet_list_skills" => json!({ "skills": meshlet.list_skills()? }),
-        "meshlet_get_context" => meshlet.context_snapshot()?,
+        "meshlet_list_tasks" => json!({ "tasks": meshlet.list_tasks(limit_arg(&args)?)? }),
+        "meshlet_get_task" => {
+            let id = str_field(&args, "id")?;
+            meshlet.show_task(id)?
+        }
+        "meshlet_get_context" => meshlet.context_snapshot_limited(limit_arg(&args)?)?,
         other => bail!("unknown tool: {other}"),
     };
     Ok(json!({
@@ -716,9 +1068,38 @@ fn mcp_tool_call(meshlet: &Meshlet, params: &Value) -> Result<Value> {
 fn mcp_read_resource(meshlet: &Meshlet, uri: &str) -> Result<Value> {
     let value = match uri {
         "meshlet://skills" => json!({ "skills": meshlet.list_skills()? }),
-        "meshlet://events/recent" => json!({ "events": meshlet.list_events(20)? }),
+        "meshlet://events/recent" => {
+            let events = meshlet.list_events_bounded(DEFAULT_LIMIT)?;
+            json!({
+                "limit": DEFAULT_LIMIT,
+                "events": {
+                    "items": events.items,
+                    "truncated": events.truncated,
+                }
+            })
+        }
+        "meshlet://tasks" => json!({
+            "limit": DEFAULT_LIMIT,
+            "tasks": meshlet.list_tasks(DEFAULT_LIMIT)?,
+        }),
+        "meshlet://evidence/recent" => json!({
+            "limit": DEFAULT_LIMIT,
+            "evidence": meshlet.list_evidence(DEFAULT_LIMIT)?,
+        }),
         "meshlet://graph" => {
-            json!({ "nodes": meshlet.graph_nodes(None)?, "edges": meshlet.graph_edges(None)? })
+            let nodes = meshlet.graph_nodes_bounded(None, DEFAULT_LIMIT)?;
+            let edges = meshlet.graph_edges_bounded(None, DEFAULT_LIMIT)?;
+            json!({
+                "limit": DEFAULT_LIMIT,
+                "nodes": {
+                    "items": nodes.items,
+                    "truncated": nodes.truncated,
+                },
+                "edges": {
+                    "items": edges.items,
+                    "truncated": edges.truncated,
+                }
+            })
         }
         other => bail!("unknown resource: {other}"),
     };
@@ -752,9 +1133,48 @@ fn mcp_tools() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "meshlet_list_tasks",
+            "description": "List local Meshlet tasks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }
+            }
+        },
+        {
+            "name": "meshlet_get_task",
+            "description": "Read one local Meshlet task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "meshlet_query",
+            "description": "Search local events, graph nodes, and graph edges.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "q": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["all", "events", "nodes", "edges"] },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                },
+                "required": ["q"]
+            }
+        },
+        {
             "name": "meshlet_get_context",
             "description": "Read recent events, skills, and graph materialization.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }
+            }
         }
     ])
 }
@@ -771,6 +1191,18 @@ fn mcp_resources() -> Value {
             "uri": "meshlet://events/recent",
             "name": "Recent Meshlet Events",
             "description": "Recent append-only events.",
+            "mimeType": "application/json"
+        },
+        {
+            "uri": "meshlet://tasks",
+            "name": "Meshlet Tasks",
+            "description": "Latest local task state.",
+            "mimeType": "application/json"
+        },
+        {
+            "uri": "meshlet://evidence/recent",
+            "name": "Recent Meshlet Evidence",
+            "description": "Recent evidence nodes.",
             "mimeType": "application/json"
         },
         {
@@ -818,7 +1250,85 @@ fn validate_skill_manifest(manifest: &SkillManifest) -> Result<()> {
     if manifest.entry.trim().is_empty() {
         bail!("skill entry must not be empty");
     }
+    let entry = Path::new(&manifest.entry);
+    if entry.is_absolute() {
+        bail!("skill entry must be relative");
+    }
+    if entry
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        bail!("skill entry must not contain parent directory components");
+    }
+    for permission in &manifest.permissions {
+        if !ALLOWED_SKILL_PERMISSIONS.contains(&permission.as_str()) {
+            bail!("unsupported skill permission: {permission}");
+        }
+    }
     Ok(())
+}
+
+fn validate_event_payload(event_type: &str, payload: &Value) -> Result<()> {
+    match event_type {
+        "task.created" => {
+            required_nonempty_string(payload, "title")?;
+        }
+        "task.updated" => {
+            required_nonempty_string(payload, "task_id")?;
+        }
+        "evidence.attached" => {
+            if nonempty_string(payload, "path").is_none()
+                && nonempty_string(payload, "ref").is_none()
+            {
+                bail!("evidence.attached requires path or ref");
+            }
+            if payload.get("task_id").is_some() {
+                required_nonempty_string(payload, "task_id")?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_no_secret_keys(value: &Value) -> Result<()> {
+    if let Some(path) = find_secret_key(value, "payload") {
+        bail!("event payload contains prohibited secret key: {path}");
+    }
+    Ok(())
+}
+
+fn find_secret_key(value: &Value, path: &str) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let child_path = format!("{path}.{key}");
+                if SECRET_KEY_DENYLIST.contains(&normalize_key(key).as_str()) {
+                    return Some(child_path);
+                }
+                if let Some(found) = find_secret_key(child, &child_path) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => {
+            for item in items {
+                if let Some(found) = find_secret_key(item, &format!("{path}[]")) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn normalize_key(key: &str) -> String {
+    key.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn str_field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
@@ -826,6 +1336,44 @@ fn str_field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing string field: {key}"))
+}
+
+fn required_nonempty_string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
+    nonempty_string(value, key).ok_or_else(|| anyhow!("missing non-empty string field: {key}"))
+}
+
+fn nonempty_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+}
+
+fn merge_task_payload(task: &mut serde_json::Map<String, Value>, event: &Event) {
+    for key in ["title", "status", "note"] {
+        if let Some(value) = event.payload.get(key) {
+            task.insert(key.to_string(), value.clone());
+        }
+    }
+    task.insert("updated_event_id".to_string(), json!(event.id));
+    task.insert("updated_at".to_string(), json!(event.created_at));
+}
+
+fn limit_arg(value: &Value) -> Result<u32> {
+    let Some(raw_limit) = value.get("limit") else {
+        return Ok(DEFAULT_LIMIT);
+    };
+    let limit = raw_limit
+        .as_u64()
+        .ok_or_else(|| anyhow!("limit must be a positive integer"))?;
+    if limit == 0 {
+        bail!("limit must be a positive integer");
+    }
+    Ok(clamp_limit(u32::try_from(limit).unwrap_or(MAX_LIMIT)))
+}
+
+fn clamp_limit(limit: u32) -> u32 {
+    limit.clamp(1, MAX_LIMIT)
 }
 
 fn canonical_json(value: &Value) -> Result<String> {
@@ -866,6 +1414,30 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         payload,
         hash: row.get(5)?,
         prev_hash: row.get(6)?,
+    })
+}
+
+struct EventRecord {
+    seq: i64,
+    event: Event,
+}
+
+fn event_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRecord> {
+    let payload_json: String = row.get(5)?;
+    let payload = serde_json::from_str(&payload_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(EventRecord {
+        seq: row.get(0)?,
+        event: Event {
+            id: row.get(1)?,
+            event_type: row.get(2)?,
+            created_at: row.get(3)?,
+            actor: row.get(4)?,
+            payload,
+            hash: row.get(6)?,
+            prev_hash: row.get(7)?,
+        },
     })
 }
 
@@ -934,6 +1506,96 @@ mod tests {
     }
 
     #[test]
+    fn append_event_rejects_secret_key_names() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        let direct = meshlet.append_event(
+            "context.added",
+            "agent:test",
+            json!({"label": "bad", "api_key": "value"}),
+        );
+        let nested = meshlet.append_event(
+            "context.added",
+            "agent:test",
+            json!({"label": "bad", "nested": {"access-token": "value"}}),
+        );
+
+        assert!(direct.is_err());
+        assert!(nested.is_err());
+        assert_eq!(meshlet.event_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn append_event_accepts_safe_payload_keys() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        meshlet.append_event(
+            "context.added",
+            "agent:test",
+            json!({"label": "safe", "note": "public context"}),
+        )?;
+
+        assert_eq!(meshlet.event_count()?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_event_chain_accepts_clean_events() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event("context.added", "agent:test", json!({"label": "clean"}))?;
+
+        let report = meshlet.verify_event_chain()?;
+
+        assert!(report.ok);
+        assert_eq!(report.events, 2);
+        assert_eq!(report.first_invalid_seq, None);
+        assert_eq!(report.reason, None);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_event_chain_detects_tampered_payload() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let event =
+            meshlet.append_event("context.added", "agent:test", json!({"label": "safe"}))?;
+        meshlet.conn.execute(
+            "UPDATE events SET payload_json = ?1 WHERE id = ?2",
+            params![r#"{"label":"tampered"}"#, event.id],
+        )?;
+
+        let report = meshlet.verify_event_chain()?;
+
+        assert!(!report.ok);
+        assert_eq!(report.first_invalid_seq, Some(2));
+        assert_eq!(report.reason.as_deref(), Some("hash_mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_event_chain_detects_tampered_prev_hash() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let event =
+            meshlet.append_event("context.added", "agent:test", json!({"label": "safe"}))?;
+        meshlet.conn.execute(
+            "UPDATE events SET prev_hash = ?1 WHERE id = ?2",
+            params!["wrong", event.id],
+        )?;
+
+        let report = meshlet.verify_event_chain()?;
+
+        assert!(!report.ok);
+        assert_eq!(report.first_invalid_seq, Some(2));
+        assert_eq!(report.reason.as_deref(), Some("prev_hash_mismatch"));
+        Ok(())
+    }
+
+    #[test]
     fn skill_manifest_roundtrip_materializes_skill_and_graph() -> Result<()> {
         let dir = tempdir()?;
         let manifest_path = dir.path().join("skill.toml");
@@ -958,6 +1620,107 @@ description = "Review Rust code."
     }
 
     #[test]
+    fn skill_manifest_rejects_unknown_permission_and_unsafe_entry() -> Result<()> {
+        let dir = tempdir()?;
+        let bad_permission = dir.path().join("bad-permission.toml");
+        fs::write(
+            &bad_permission,
+            r#"
+name = "bad-permission"
+version = "0.1.0"
+kind = "skill"
+entry = "./SKILL.md"
+permissions = ["network"]
+"#,
+        )?;
+        let absolute_entry = dir.path().join("absolute-entry.toml");
+        fs::write(
+            &absolute_entry,
+            r#"
+name = "absolute-entry"
+version = "0.1.0"
+kind = "skill"
+entry = "/tmp/SKILL.md"
+permissions = ["read_repo"]
+"#,
+        )?;
+        let parent_entry = dir.path().join("parent-entry.toml");
+        fs::write(
+            &parent_entry,
+            r#"
+name = "parent-entry"
+version = "0.1.0"
+kind = "skill"
+entry = "../SKILL.md"
+permissions = ["read_repo"]
+"#,
+        )?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        assert!(meshlet.add_skill_manifest(&bad_permission).is_err());
+        assert!(meshlet.add_skill_manifest(&absolute_entry).is_err());
+        assert!(meshlet.add_skill_manifest(&parent_entry).is_err());
+        assert_eq!(meshlet.event_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn query_finds_events_nodes_and_edges() -> Result<()> {
+        let dir = tempdir()?;
+        let manifest_path = dir.path().join("skill.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+name = "query-rust-review"
+version = "0.1.0"
+kind = "skill"
+entry = "./SKILL.md"
+permissions = ["read_repo"]
+"#,
+        )?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.add_skill_manifest(&manifest_path)?;
+
+        let all = meshlet.query("query-rust-review", Some("all"), 20)?;
+        assert_eq!(all["kind"], "all");
+        assert!(
+            all["events"]["items"]
+                .as_array()
+                .expect("event items")
+                .iter()
+                .any(|event| event["type"] == "skill.added")
+        );
+        assert!(
+            all["nodes"]["items"]
+                .as_array()
+                .expect("node items")
+                .iter()
+                .any(|node| node["kind"] == "skill")
+        );
+
+        let edges = meshlet.query("references", Some("edges"), 20)?;
+        assert!(
+            edges["edges"]["items"]
+                .as_array()
+                .expect("edge items")
+                .iter()
+                .any(|edge| edge["kind"] == "references")
+        );
+        assert!(edges["events"].is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn query_rejects_empty_or_unknown_kind() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        assert!(meshlet.query(" ", Some("all"), 20).is_err());
+        assert!(meshlet.query("repo", Some("bad"), 20).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn graph_rebuild_is_deterministic() -> Result<()> {
         let dir = tempdir()?;
         let meshlet = Meshlet::init(dir.path())?;
@@ -971,6 +1734,72 @@ description = "Review Rust code."
         meshlet.conn.execute("DELETE FROM graph_edges", [])?;
         meshlet.rebuild_graph()?;
         assert_eq!(before, meshlet.graph_nodes(None)?);
+        Ok(())
+    }
+
+    #[test]
+    fn task_and_evidence_views_track_latest_state_and_graph_edges() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "task.created",
+            "agent:test",
+            json!({"task_id": "task-1", "title": "Ship journal", "status": "open"}),
+        )?;
+        meshlet.append_event(
+            "task.updated",
+            "agent:test",
+            json!({"task_id": "task-1", "status": "done", "note": "verified"}),
+        )?;
+        let evidence = meshlet.append_event(
+            "evidence.attached",
+            "agent:test",
+            json!({"path": "src/lib.rs", "task_id": "task-1", "note": "impl"}),
+        )?;
+
+        let task = meshlet.show_task("task-1")?;
+        assert_eq!(task["status"], "done");
+        assert_eq!(task["note"], "verified");
+        assert_eq!(meshlet.list_tasks(20)?.len(), 1);
+        assert_eq!(meshlet.list_evidence(20)?.len(), 1);
+        assert_eq!(
+            meshlet.show_evidence(&format!("evidence:{}", evidence.id))?["kind"],
+            "evidence"
+        );
+        assert!(
+            meshlet
+                .graph_edges_limited(Some(&format!("evidence:{}", evidence.id)), 20)?
+                .iter()
+                .any(|edge| edge["kind"] == "supports" && edge["to_id"] == "task:task-1")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn task_and_evidence_payloads_require_core_fields() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        assert!(
+            meshlet
+                .append_event("task.created", "agent:test", json!({"status": "open"}))
+                .is_err()
+        );
+        assert!(
+            meshlet
+                .append_event("task.updated", "agent:test", json!({"status": "done"}))
+                .is_err()
+        );
+        assert!(
+            meshlet
+                .append_event(
+                    "evidence.attached",
+                    "agent:test",
+                    json!({"note": "missing"})
+                )
+                .is_err()
+        );
+        assert_eq!(meshlet.event_count()?, 1);
         Ok(())
     }
 
@@ -1001,6 +1830,9 @@ description = "Review Rust code."
             .collect::<Vec<_>>();
         assert!(names.contains(&"meshlet_publish_event"));
         assert!(names.contains(&"meshlet_list_skills"));
+        assert!(names.contains(&"meshlet_list_tasks"));
+        assert!(names.contains(&"meshlet_get_task"));
+        assert!(names.contains(&"meshlet_query"));
         assert!(names.contains(&"meshlet_get_context"));
         Ok(())
     }
@@ -1060,6 +1892,60 @@ description = "Review Rust code through MCP."
     }
 
     #[test]
+    fn mcp_query_returns_search_results() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "context.added",
+            "agent:test",
+            json!({"label": "needle context"}),
+        )?;
+
+        let response = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({
+                "name": "meshlet_query",
+                "arguments": { "q": "needle", "kind": "events", "limit": 5 }
+            }),
+        );
+        let value: Value = serde_json::from_str(mcp_content_text(&response))?;
+
+        assert_eq!(value["kind"], "events");
+        assert_eq!(value["limit"], 5);
+        assert_eq!(value["events"]["items"][0]["type"], "context.added");
+        assert!(value["nodes"].is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_get_context_respects_limit() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        for index in 0..25 {
+            meshlet.append_event("context.added", "agent:test", json!({"label": index}))?;
+        }
+
+        let response = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({ "name": "meshlet_get_context", "arguments": { "limit": 3 } }),
+        );
+        let value: Value = serde_json::from_str(mcp_content_text(&response))?;
+
+        assert_eq!(value["limit"], 3);
+        assert_eq!(
+            value["events_recent"]["items"]
+                .as_array()
+                .expect("event items")
+                .len(),
+            3
+        );
+        assert_eq!(value["events_recent"]["truncated"], true);
+        Ok(())
+    }
+
+    #[test]
     fn mcp_resources_list_advertises_core_resources() -> Result<()> {
         let dir = tempdir()?;
         let meshlet = Meshlet::init(dir.path())?;
@@ -1074,6 +1960,8 @@ description = "Review Rust code through MCP."
             .collect::<Vec<_>>();
         assert!(uris.contains(&"meshlet://skills"));
         assert!(uris.contains(&"meshlet://events/recent"));
+        assert!(uris.contains(&"meshlet://tasks"));
+        assert!(uris.contains(&"meshlet://evidence/recent"));
         assert!(uris.contains(&"meshlet://graph"));
         Ok(())
     }
@@ -1108,6 +1996,57 @@ description = "Review Rust code through resources."
         );
         let value: Value = serde_json::from_str(mcp_resource_text(&response))?;
         assert_eq!(value["skills"][0]["name"], "resource-rust-review");
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_task_tools_and_resources_return_task_views() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "task.created",
+            "agent:test",
+            json!({"task_id": "mcp-task", "title": "Expose tasks", "status": "open"}),
+        )?;
+
+        let list = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({ "name": "meshlet_list_tasks", "arguments": { "limit": 5 } }),
+        );
+        let listed: Value = serde_json::from_str(mcp_content_text(&list))?;
+        assert_eq!(listed["tasks"][0]["id"], "mcp-task");
+
+        let show = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({ "name": "meshlet_get_task", "arguments": { "id": "mcp-task" } }),
+        );
+        let shown: Value = serde_json::from_str(mcp_content_text(&show))?;
+        assert_eq!(shown["title"], "Expose tasks");
+
+        let resource = mcp_request(
+            &meshlet,
+            "resources/read",
+            json!({ "uri": "meshlet://tasks" }),
+        );
+        let value: Value = serde_json::from_str(mcp_resource_text(&resource))?;
+        assert_eq!(value["tasks"][0]["id"], "mcp-task");
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_get_task_returns_json_rpc_error_for_missing_task() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        let response = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({ "name": "meshlet_get_task", "arguments": { "id": "missing" } }),
+        );
+
+        assert_eq!(response["error"]["code"], -32602);
         Ok(())
     }
 

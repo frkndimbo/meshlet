@@ -17,6 +17,21 @@
 - MCP tools must be small, typed, and return structured JSON-RPC errors.
 - Skills must use explicit manifests and declared permissions.
 
+## Optimization
+- Use Ponytail as an additive simplicity check when available.
+- Prefer YAGNI, existing repo patterns, stdlib, and minimal correct code.
+- Do not use Ponytail to cut security checks, validation, tests, error handling, accessibility, or documented phase rules.
+- If Ponytail advice conflicts with Meshlet scope, security, or architecture rules, keep the Meshlet rule.
+
+## Token Economy
+- Preserve accuracy by reducing context and output noise, not evidence, safety, validation, tests, or required verification.
+- Use graph-first navigation for architecture questions when `graphify-out/graph.json` exists.
+- Search before reading; read narrow files or line ranges and avoid full `graph.json` unless needed.
+- Use `rtk git diff --stat` before detailed diffs; inspect full diffs only for changed or high-risk files.
+- Keep patches small and scoped. Avoid broad rewrites unless explicitly required.
+- Report successful verification tersely; include full logs only for failures or ambiguous results.
+- Load only the minimal relevant skills for the task.
+
 ## Security
 - Never store secrets in events, graph attrs, logs, tests, docs, or examples.
 - Do not add implicit shell or network execution from skill manifests.
@@ -36,25 +51,14 @@
 - Move stale notes to deprecated/superseded instead of leaving them active.
 
 ## Graphify
-- If `graphify-out/graph.json` exists, answer architecture questions from graph first.
-- Rerun Graphify manually after structural source/docs/policy/MCP changes.
-- Do not rely on stale graph reports for repo readiness checks.
+- For `/graphify`, use the `graphify` skill before other work.
+- If `graphify-out/graph.json` exists, answer architecture questions with `graphify query`, `graphify path`, or `graphify explain` before raw file reads.
+- Use `graphify-out/wiki/index.md` for broad navigation when present; read `GRAPH_REPORT.md` only for broad architecture review or insufficient query results.
+- Dirty graphify outputs are expected after hooks or incremental updates; skip graph-first only for stale/incorrect graph tasks or explicit user opt-out.
+- Run `graphify update .` after structural source/docs/policy/MCP changes; run clustering/report refresh only when report/community data is needed.
 
 ## Git
 - Stage specific files only.
 - Use Conventional Commits.
 - Commit author: `frkndimbo <da.purplecats@gmail.com>`.
 - Do not add co-author trailers.
-
-## graphify
-
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
-
-When the user types `/graphify`, invoke the `skill` tool with `skill: "graphify"` before doing anything else.
-
-Rules:
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

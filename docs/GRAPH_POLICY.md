@@ -21,6 +21,7 @@ Current edge kinds:
 
 - `references`
 - `produced`
+- `supports`
 
 New node or edge kinds require a matching update to this file and tests for rebuild behavior.
 
@@ -29,6 +30,7 @@ New node or edge kinds require a matching update to this file and tests for rebu
 - Graphify is installed for Codex via AGENTS.md and `.codex/hooks.json`.
 - Run Graphify manually after structural source, docs, policy, or MCP changes when hooks do not update the graph.
 - `graphify update .` is the default low-cost code graph refresh.
+- After manual updates, run clustering/report refresh with `graphify cluster-only . --no-viz --no-label` when report/community data is needed.
 - Full semantic extraction can be retried when quota/API backend is available.
 - If `graphify-out/graph.json` exists, answer architecture questions from graph first.
 - Treat graph reports as stale if source/docs changed after the latest graph generation.

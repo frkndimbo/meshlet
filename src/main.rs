@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use meshlet::{Meshlet, find_project_root, parse_json_arg, run_mcp_stdio};
+use meshlet::{DEFAULT_LIMIT, Meshlet, find_project_root, parse_json_arg, run_mcp_stdio};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -19,6 +19,14 @@ struct Cli {
 enum Command {
     Init,
     Status,
+    Verify,
+    Query {
+        q: String,
+        #[arg(long, default_value = "all")]
+        kind: String,
+        #[arg(long, default_value_t = DEFAULT_LIMIT)]
+        limit: u32,
+    },
     Event {
         #[command(subcommand)]
         command: EventCommand,
@@ -30,6 +38,14 @@ enum Command {
     Skill {
         #[command(subcommand)]
         command: SkillCommand,
+    },
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
+    Evidence {
+        #[command(subcommand)]
+        command: EvidenceCommand,
     },
     Serve {
         #[arg(long)]
@@ -62,10 +78,14 @@ enum GraphCommand {
     Nodes {
         #[arg(long)]
         kind: Option<String>,
+        #[arg(long, default_value_t = DEFAULT_LIMIT)]
+        limit: u32,
     },
     Edges {
         #[arg(long)]
         from: Option<String>,
+        #[arg(long, default_value_t = DEFAULT_LIMIT)]
+        limit: u32,
     },
 }
 
@@ -74,6 +94,28 @@ enum SkillCommand {
     Add { manifest_path: PathBuf },
     List,
     Show { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum TaskCommand {
+    List {
+        #[arg(long, default_value_t = DEFAULT_LIMIT)]
+        limit: u32,
+    },
+    Show {
+        id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EvidenceCommand {
+    List {
+        #[arg(long, default_value_t = DEFAULT_LIMIT)]
+        limit: u32,
+    },
+    Show {
+        id: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -102,6 +144,16 @@ fn main() -> Result<()> {
                 }))?
             );
         }
+        Command::Verify => {
+            let root = find_project_root()?;
+            let meshlet = Meshlet::open(&root)?;
+            print_json(&meshlet.verify_event_chain()?)?;
+        }
+        Command::Query { q, kind, limit } => {
+            let root = find_project_root()?;
+            let meshlet = Meshlet::open(&root)?;
+            print_json(&meshlet.query(&q, Some(&kind), limit)?)?;
+        }
         Command::Event { command } => {
             let root = find_project_root()?;
             let meshlet = Meshlet::open(&root)?;
@@ -127,8 +179,12 @@ fn main() -> Result<()> {
                     meshlet.rebuild_graph()?;
                     print_json(&serde_json::json!({ "status": "rebuilt" }))?;
                 }
-                GraphCommand::Nodes { kind } => print_json(&meshlet.graph_nodes(kind.as_deref())?)?,
-                GraphCommand::Edges { from } => print_json(&meshlet.graph_edges(from.as_deref())?)?,
+                GraphCommand::Nodes { kind, limit } => {
+                    print_json(&meshlet.graph_nodes_limited(kind.as_deref(), limit)?)?
+                }
+                GraphCommand::Edges { from, limit } => {
+                    print_json(&meshlet.graph_edges_limited(from.as_deref(), limit)?)?
+                }
             }
         }
         Command::Skill { command } => {
@@ -141,6 +197,22 @@ fn main() -> Result<()> {
                 }
                 SkillCommand::List => print_json(&meshlet.list_skills()?)?,
                 SkillCommand::Show { name } => print_json(&meshlet.show_skill(&name)?)?,
+            }
+        }
+        Command::Task { command } => {
+            let root = find_project_root()?;
+            let meshlet = Meshlet::open(&root)?;
+            match command {
+                TaskCommand::List { limit } => print_json(&meshlet.list_tasks(limit)?)?,
+                TaskCommand::Show { id } => print_json(&meshlet.show_task(&id)?)?,
+            }
+        }
+        Command::Evidence { command } => {
+            let root = find_project_root()?;
+            let meshlet = Meshlet::open(&root)?;
+            match command {
+                EvidenceCommand::List { limit } => print_json(&meshlet.list_evidence(limit)?)?,
+                EvidenceCommand::Show { id } => print_json(&meshlet.show_evidence(&id)?)?,
             }
         }
         Command::Serve { mcp } => {
