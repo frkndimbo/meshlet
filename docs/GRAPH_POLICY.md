@@ -16,14 +16,27 @@ Current node kinds:
 - `message`
 - `evidence`
 - `task`
+- `imported`
 
 Current edge kinds:
 
 - `references`
 - `produced`
 - `supports`
+- `depends_on`
+- `uses`
+- `derived_from`
+- `updates`
 
 New node or edge kinds require a matching update to this file and tests for rebuild behavior.
+
+## Import Rules
+
+- Imported graph data must enter through a `graph.imported` event.
+- Graph imports are materialized views and must rebuild from the event log.
+- Imported node IDs use `<namespace>:<external_id>`.
+- Imported graph attrs must include `namespace`, `source`, and `external_id` for nodes.
+- Unknown imported relations materialize as `references` edges while preserving the original `relation` attr.
 
 ## Graphify Policy
 

@@ -20,38 +20,38 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1782437459.5106945,
-    "ast_hash": "a76fa7b9ee171f0289e64adb9c96740f",
+    "mtime": 1782442925.3135588,
+    "ast_hash": "91064de2e3e52e94e487014c652e2790",
     "semantic_hash": ""
   },
   "docs/GRAPH_POLICY.md": {
-    "mtime": 1782437446.1715994,
-    "ast_hash": "0f427da578a085393b019dc6ebf78857",
+    "mtime": 1782442948.501879,
+    "ast_hash": "0166c5db6fb97915a49e4e19da29485a",
     "semantic_hash": ""
   },
   "docs/MCP_POLICY.md": {
-    "mtime": 1782437452.815647,
-    "ast_hash": "bb4b7892131d64956d4a4c89b427712c",
+    "mtime": 1782442968.6581516,
+    "ast_hash": "d5793acb763ccf719b694a409a22d5e0",
     "semantic_hash": ""
   },
   "docs/PROGRESS.md": {
-    "mtime": 1782437667.880118,
-    "ast_hash": "ecb5417392504aa3a38a0866efc65244",
+    "mtime": 1782443018.904809,
+    "ast_hash": "fa47ce29765f2a4e221a1bbec6de2076",
     "semantic_hash": ""
   },
   "docs/SCOPE.md": {
-    "mtime": 1782350344.624078,
-    "ast_hash": "1b9af407d7cb0817729994e6825c2991",
+    "mtime": 1782442938.0497355,
+    "ast_hash": "62d85d22b9758f457a2ec3db00c95f61",
     "semantic_hash": ""
   },
   "docs/SECURITY_POLICY.md": {
-    "mtime": 1782429192.800058,
-    "ast_hash": "162f98f2968e527f84887dda982c55b6",
+    "mtime": 1782442977.4302688,
+    "ast_hash": "a8b3c2ab9e36af73b8ea45fd5d4161f4",
     "semantic_hash": ""
   },
   "docs/SKILL_POLICY.md": {
-    "mtime": 1782437441.7295675,
-    "ast_hash": "febb9476edaac650e5985d3ceee533b5",
+    "mtime": 1782442985.312373,
+    "ast_hash": "f7570b9db3dbbe0ca9bd8493937f1190",
     "semantic_hash": ""
   },
   ".codex/hooks.json": {
@@ -70,8 +70,8 @@
     "semantic_hash": ""
   },
   "task.md": {
-    "mtime": 1782442683.9357047,
-    "ast_hash": "63fcb5f0f51f9704ef5a915112789a8c",
+    "mtime": 1782442901.9442282,
+    "ast_hash": "4798021f5e3d67c05429d9442d229155",
     "semantic_hash": ""
   }
 }

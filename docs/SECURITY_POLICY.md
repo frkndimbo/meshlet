@@ -20,6 +20,9 @@
 - MCP tools must validate inputs.
 - Skill manifests must declare permissions.
 - Shell/network execution is out of scope for v0.1 skill handling.
+- Graph imports are CLI-only in v0.2; MCP must not import arbitrary files.
+- Evidence attach may hash local files, but stored evidence payloads must not contain secret values.
+- Evidence verification reports digest match status and must not print file contents.
 
 ## Future Remote Mode
 

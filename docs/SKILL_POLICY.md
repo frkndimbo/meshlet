@@ -22,7 +22,7 @@ description = "Review Rust code."
 
 ## Permissions
 
-- Permissions are declarations in v0.1, not enforcement guarantees.
+- Permissions are declarations in v0.2, not enforcement guarantees.
 - Allowed permission names are `read_repo`, `read_files`, `write_docs`, and `run_check`.
 - Skill entries must be relative paths and must not contain `..`.
 - No implicit shell or network access from a skill manifest.
