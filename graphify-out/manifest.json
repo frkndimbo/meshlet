@@ -1,7 +1,7 @@
 {
   "src/lib.rs": {
-    "mtime": 1782437488.5048995,
-    "ast_hash": "ee23b6d47019a16a88b4e70eae844c7d",
+    "mtime": 1782441577.3508635,
+    "ast_hash": "c553e6af365f5f6c8a4a6c5363e4e82e",
     "semantic_hash": ""
   },
   "src/main.rs": {
@@ -35,8 +35,8 @@
     "semantic_hash": ""
   },
   "docs/PROGRESS.md": {
-    "mtime": 1782437509.173044,
-    "ast_hash": "63c616af638a0cab4ad81c4ca92fe678",
+    "mtime": 1782437667.880118,
+    "ast_hash": "ecb5417392504aa3a38a0866efc65244",
     "semantic_hash": ""
   },
   "docs/SCOPE.md": {
@@ -62,6 +62,16 @@
   "docs/PRODUCT_HANDOFF.md": {
     "mtime": 1782356110.1707804,
     "ast_hash": "4fff5cad8d3afdb1b6438b26d3157876",
+    "semantic_hash": ""
+  },
+  "src/mcp.rs": {
+    "mtime": 1782441501.0925128,
+    "ast_hash": "c0f51925e0975f46744122ffd5bfa7b5",
+    "semantic_hash": ""
+  },
+  "task.md": {
+    "mtime": 1782441421.7491415,
+    "ast_hash": "6f3758d70ad684457d5a9b20ae76e871",
     "semantic_hash": ""
   }
 }
