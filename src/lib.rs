@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -462,6 +462,24 @@ impl Meshlet {
         Ok(self.graph_edges_bounded(from_id, limit)?.items)
     }
 
+    pub fn graph_namespaces(&self) -> Result<Vec<String>> {
+        let mut namespaces = BTreeSet::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT attrs_json FROM graph_nodes UNION ALL SELECT attrs_json FROM graph_edges",
+        )?;
+        let attrs = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for attr_json in attrs {
+            if let Ok(value) = serde_json::from_str::<Value>(&attr_json) {
+                if let Some(namespace) = value.get("namespace").and_then(Value::as_str) {
+                    namespaces.insert(namespace.to_string());
+                }
+            }
+        }
+        Ok(namespaces.into_iter().collect())
+    }
+
     pub fn import_graph_file(
         &self,
         graph_path: impl AsRef<Path>,
@@ -568,9 +586,22 @@ impl Meshlet {
     }
 
     pub fn query(&self, q: &str, kind: Option<&str>, limit: u32) -> Result<Value> {
+        self.query_scoped(q, kind, None, limit)
+    }
+
+    pub fn query_scoped(
+        &self,
+        q: &str,
+        kind: Option<&str>,
+        namespace: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
         let needle = q.trim().to_lowercase();
         if needle.is_empty() {
             bail!("query must not be empty");
+        }
+        if namespace.is_some_and(|value| value.trim().is_empty()) {
+            bail!("namespace must not be empty");
         }
         let kind = kind.unwrap_or("all");
         if !matches!(kind, "all" | "events" | "nodes" | "edges") {
@@ -583,12 +614,12 @@ impl Meshlet {
             None
         };
         let nodes = if matches!(kind, "all" | "nodes") {
-            Some(self.query_nodes(&needle, limit)?)
+            Some(self.query_nodes(&needle, namespace, limit)?)
         } else {
             None
         };
         let edges = if matches!(kind, "all" | "edges") {
-            Some(self.query_edges(&needle, limit)?)
+            Some(self.query_edges(&needle, namespace, limit)?)
         } else {
             None
         };
@@ -596,6 +627,7 @@ impl Meshlet {
         Ok(json!({
             "q": q,
             "kind": kind,
+            "namespace": namespace,
             "limit": limit,
             "events": events.map(|bounded| json!({
                 "items": bounded.items,
@@ -634,9 +666,25 @@ impl Meshlet {
         })
     }
 
-    fn query_nodes(&self, needle: &str, limit: u32) -> Result<Bounded<Value>> {
+    fn query_nodes(
+        &self,
+        needle: &str,
+        namespace: Option<&str>,
+        limit: u32,
+    ) -> Result<Bounded<Value>> {
         let limit = clamp_limit(limit);
-        let mut stmt = self.conn.prepare(
+        let namespace_filter = namespace.map(namespace_json_fragment).transpose()?;
+        let sql = if namespace_filter.is_some() {
+            "SELECT id, kind, label, attrs_json, source_event_id
+             FROM graph_nodes
+             WHERE (instr(lower(id), ?1) > 0
+                OR instr(lower(kind), ?1) > 0
+                OR instr(lower(coalesce(label, '')), ?1) > 0
+                OR instr(lower(attrs_json), ?1) > 0)
+               AND instr(attrs_json, ?2) > 0
+             ORDER BY id
+             LIMIT ?3"
+        } else {
             "SELECT id, kind, label, attrs_json, source_event_id
              FROM graph_nodes
              WHERE instr(lower(id), ?1) > 0
@@ -644,11 +692,16 @@ impl Meshlet {
                 OR instr(lower(coalesce(label, '')), ?1) > 0
                 OR instr(lower(attrs_json), ?1) > 0
              ORDER BY id
-             LIMIT ?2",
-        )?;
-        let mut nodes = stmt
-            .query_map(params![needle, limit + 1], node_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+             LIMIT ?2"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut nodes = if let Some(filter) = namespace_filter {
+            stmt.query_map(params![needle, filter, limit + 1], node_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map(params![needle, limit + 1], node_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
         let truncated = nodes.len() > limit as usize;
         nodes.truncate(limit as usize);
         Ok(Bounded {
@@ -657,9 +710,26 @@ impl Meshlet {
         })
     }
 
-    fn query_edges(&self, needle: &str, limit: u32) -> Result<Bounded<Value>> {
+    fn query_edges(
+        &self,
+        needle: &str,
+        namespace: Option<&str>,
+        limit: u32,
+    ) -> Result<Bounded<Value>> {
         let limit = clamp_limit(limit);
-        let mut stmt = self.conn.prepare(
+        let namespace_filter = namespace.map(namespace_json_fragment).transpose()?;
+        let sql = if namespace_filter.is_some() {
+            "SELECT id, from_id, to_id, kind, attrs_json, source_event_id
+             FROM graph_edges
+             WHERE (instr(lower(id), ?1) > 0
+                OR instr(lower(from_id), ?1) > 0
+                OR instr(lower(to_id), ?1) > 0
+                OR instr(lower(kind), ?1) > 0
+                OR instr(lower(attrs_json), ?1) > 0)
+               AND instr(attrs_json, ?2) > 0
+             ORDER BY id
+             LIMIT ?3"
+        } else {
             "SELECT id, from_id, to_id, kind, attrs_json, source_event_id
              FROM graph_edges
              WHERE instr(lower(id), ?1) > 0
@@ -668,11 +738,16 @@ impl Meshlet {
                 OR instr(lower(kind), ?1) > 0
                 OR instr(lower(attrs_json), ?1) > 0
              ORDER BY id
-             LIMIT ?2",
-        )?;
-        let mut edges = stmt
-            .query_map(params![needle, limit + 1], edge_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+             LIMIT ?2"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut edges = if let Some(filter) = namespace_filter {
+            stmt.query_map(params![needle, filter, limit + 1], edge_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map(params![needle, limit + 1], edge_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
         let truncated = edges.len() > limit as usize;
         edges.truncate(limit as usize);
         Ok(Bounded {
@@ -1216,6 +1291,13 @@ fn graph_import_edge_kind(relation: &str) -> &str {
         | "updates" => relation,
         _ => "references",
     }
+}
+
+fn namespace_json_fragment(namespace: &str) -> Result<String> {
+    Ok(format!(
+        "\"namespace\":{}",
+        serde_json::to_string(namespace)?
+    ))
 }
 
 fn clamp_limit(limit: u32) -> u32 {
@@ -1822,6 +1904,66 @@ permissions = ["read_repo"]
         assert_eq!(report["edges"], 1);
         assert!(report["source_sha256"].as_str().expect("digest").len() == 64);
         assert_eq!(meshlet.event_count()?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_namespaces_lists_imported_namespaces() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "a", "label": "A"}],
+                "links": []
+            }),
+        )?;
+
+        assert_eq!(meshlet.graph_namespaces()?, vec!["graphify:repo"]);
+        Ok(())
+    }
+
+    #[test]
+    fn query_namespace_filters_imported_nodes_and_edges() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [
+                    {"id": "a", "label": "Needle"},
+                    {"id": "b", "label": "Target"}
+                ],
+                "links": [{"source": "a", "target": "b", "relation": "uses"}]
+            }),
+        )?;
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:other",
+                "nodes": [{"id": "a", "label": "Needle"}],
+                "links": []
+            }),
+        )?;
+
+        let scoped = meshlet.query_scoped("Needle", Some("nodes"), Some("graphify:repo"), 20)?;
+        assert_eq!(scoped["namespace"], "graphify:repo");
+        assert_eq!(scoped["nodes"]["items"].as_array().expect("nodes").len(), 1);
+        assert_eq!(
+            scoped["nodes"]["items"][0]["attrs"]["namespace"],
+            "graphify:repo"
+        );
+
+        let edges = meshlet.query_scoped("uses", Some("edges"), Some("graphify:repo"), 20)?;
+        assert_eq!(edges["edges"]["items"].as_array().expect("edges").len(), 1);
         Ok(())
     }
 

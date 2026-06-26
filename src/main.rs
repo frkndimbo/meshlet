@@ -24,6 +24,8 @@ enum Command {
         q: String,
         #[arg(long, default_value = "all")]
         kind: String,
+        #[arg(long)]
+        namespace: Option<String>,
         #[arg(long, default_value_t = DEFAULT_LIMIT)]
         limit: u32,
     },
@@ -87,6 +89,7 @@ enum GraphCommand {
         #[arg(long, default_value_t = DEFAULT_LIMIT)]
         limit: u32,
     },
+    Namespaces,
     Import {
         graph_path: PathBuf,
         #[arg(long)]
@@ -156,10 +159,15 @@ fn main() -> Result<()> {
             let meshlet = Meshlet::open(&root)?;
             print_json(&meshlet.verify_event_chain()?)?;
         }
-        Command::Query { q, kind, limit } => {
+        Command::Query {
+            q,
+            kind,
+            namespace,
+            limit,
+        } => {
             let root = find_project_root()?;
             let meshlet = Meshlet::open(&root)?;
-            print_json(&meshlet.query(&q, Some(&kind), limit)?)?;
+            print_json(&meshlet.query_scoped(&q, Some(&kind), namespace.as_deref(), limit)?)?;
         }
         Command::Event { command } => {
             let root = find_project_root()?;
@@ -192,6 +200,7 @@ fn main() -> Result<()> {
                 GraphCommand::Edges { from, limit } => {
                     print_json(&meshlet.graph_edges_limited(from.as_deref(), limit)?)?
                 }
+                GraphCommand::Namespaces => print_json(&meshlet.graph_namespaces()?)?,
                 GraphCommand::Import {
                     graph_path,
                     source,
