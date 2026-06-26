@@ -739,6 +739,7 @@ impl Meshlet {
             "agent.message" => self.apply_agent_message(event)?,
             "evidence.attached" => self.apply_evidence(event)?,
             "task.created" | "task.updated" => self.apply_task(event)?,
+            "graph.imported" => self.apply_graph_imported(event)?,
             _ => {}
         }
         Ok(())
@@ -894,6 +895,59 @@ impl Meshlet {
         Ok(())
     }
 
+    fn apply_graph_imported(&self, event: &Event) -> Result<()> {
+        let source = str_field(&event.payload, "source")?;
+        let namespace = str_field(&event.payload, "namespace")?;
+        let nodes = event
+            .payload
+            .get("nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("graph.imported nodes must be an array"))?;
+        let links = event
+            .payload
+            .get("links")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("graph.imported links must be an array"))?;
+
+        for node in nodes {
+            let external_id = str_field(node, "id")?;
+            let node_id = imported_node_id(namespace, external_id);
+            let label = node.get("label").and_then(Value::as_str);
+            let mut attrs = node.as_object().cloned().unwrap_or_default();
+            attrs.insert("namespace".to_string(), json!(namespace));
+            attrs.insert("source".to_string(), json!(source));
+            attrs.insert("external_id".to_string(), json!(external_id));
+            if let Some(origin) = attrs.remove("_origin") {
+                attrs.insert("origin".to_string(), origin);
+            }
+            self.upsert_node(&node_id, "imported", label, Value::Object(attrs), &event.id)?;
+        }
+
+        for (index, link) in links.iter().enumerate() {
+            let source_id = str_field(link, "source")?;
+            let target_id = str_field(link, "target")?;
+            let relation = link
+                .get("relation")
+                .and_then(Value::as_str)
+                .unwrap_or("references");
+            let from_id = imported_node_id(namespace, source_id);
+            let to_id = imported_node_id(namespace, target_id);
+            let mut attrs = link.as_object().cloned().unwrap_or_default();
+            attrs.insert("namespace".to_string(), json!(namespace));
+            attrs.insert("source".to_string(), json!(source));
+            attrs.insert("relation".to_string(), json!(relation));
+            self.upsert_edge(
+                &format!("edge:{}:graphify:{index}", event.id),
+                &from_id,
+                &to_id,
+                graph_import_edge_kind(relation),
+                Value::Object(attrs),
+                &event.id,
+            )?;
+        }
+        Ok(())
+    }
+
     fn upsert_node(
         &self,
         id: &str,
@@ -1016,11 +1070,18 @@ fn validate_event_payload(event_type: &str, payload: &Value) -> Result<()> {
         "graph.imported" => {
             required_nonempty_string(payload, "source")?;
             required_nonempty_string(payload, "namespace")?;
-            if !payload.get("nodes").is_some_and(Value::is_array) {
+            let Some(nodes) = payload.get("nodes").and_then(Value::as_array) else {
                 bail!("graph.imported nodes must be an array");
-            }
-            if !payload.get("links").is_some_and(Value::is_array) {
+            };
+            let Some(links) = payload.get("links").and_then(Value::as_array) else {
                 bail!("graph.imported links must be an array");
+            };
+            for node in nodes {
+                required_nonempty_string(node, "id")?;
+            }
+            for link in links {
+                required_nonempty_string(link, "source")?;
+                required_nonempty_string(link, "target")?;
             }
         }
         _ => {}
@@ -1094,6 +1155,18 @@ fn merge_task_payload(task: &mut serde_json::Map<String, Value>, event: &Event) 
     }
     task.insert("updated_event_id".to_string(), json!(event.id));
     task.insert("updated_at".to_string(), json!(event.created_at));
+}
+
+fn imported_node_id(namespace: &str, external_id: &str) -> String {
+    format!("{namespace}:{external_id}")
+}
+
+fn graph_import_edge_kind(relation: &str) -> &str {
+    match relation {
+        "references" | "produced" | "supports" | "depends_on" | "uses" | "derived_from"
+        | "updates" => relation,
+        _ => "references",
+    }
 }
 
 fn clamp_limit(limit: u32) -> u32 {
@@ -1592,6 +1665,78 @@ permissions = ["read_repo"]
                 .is_err()
         );
         assert_eq!(meshlet.event_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_import_materializes_namespaced_nodes_and_edges() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [
+                    {"id": "a", "label": "A", "source_file": "a.rs", "_origin": "ast"},
+                    {"id": "b", "label": "B", "source_file": "b.rs", "_origin": "ast"}
+                ],
+                "links": [
+                    {"source": "a", "target": "b", "relation": "uses", "confidence": "EXTRACTED"}
+                ]
+            }),
+        )?;
+
+        let nodes = meshlet.graph_nodes_limited(None, 20)?;
+        assert!(
+            nodes.iter().any(|node| node["id"] == "graphify:repo:a"
+                && node["attrs"]["namespace"] == "graphify:repo")
+        );
+        let edges = meshlet.graph_edges_limited(Some("graphify:repo:a"), 20)?;
+        assert!(edges.iter().any(|edge| {
+            edge["to_id"] == "graphify:repo:b"
+                && edge["kind"] == "uses"
+                && edge["attrs"]["relation"] == "uses"
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn graph_rebuild_preserves_imported_graph() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [
+                    {"id": "a", "label": "A"},
+                    {"id": "b", "label": "B"}
+                ],
+                "links": [
+                    {"source": "a", "target": "b", "relation": "unknown_relation"}
+                ]
+            }),
+        )?;
+        let before_nodes = meshlet.graph_nodes_limited(None, 20)?;
+        let before_edges = meshlet.graph_edges_limited(None, 20)?;
+
+        meshlet.conn.execute("DELETE FROM graph_nodes", [])?;
+        meshlet.conn.execute("DELETE FROM graph_edges", [])?;
+        meshlet.rebuild_graph()?;
+
+        assert_eq!(before_nodes, meshlet.graph_nodes_limited(None, 20)?);
+        assert_eq!(before_edges, meshlet.graph_edges_limited(None, 20)?);
+        assert!(
+            meshlet
+                .graph_edges_limited(Some("graphify:repo:a"), 20)?
+                .iter()
+                .any(|edge| edge["kind"] == "references"
+                    && edge["attrs"]["relation"] == "unknown_relation")
+        );
         Ok(())
     }
 
