@@ -87,6 +87,13 @@ enum GraphCommand {
         #[arg(long, default_value_t = DEFAULT_LIMIT)]
         limit: u32,
     },
+    Import {
+        graph_path: PathBuf,
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        namespace: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -185,6 +192,11 @@ fn main() -> Result<()> {
                 GraphCommand::Edges { from, limit } => {
                     print_json(&meshlet.graph_edges_limited(from.as_deref(), limit)?)?
                 }
+                GraphCommand::Import {
+                    graph_path,
+                    source,
+                    namespace,
+                } => print_json(&meshlet.import_graph_file(graph_path, &source, &namespace)?)?,
             }
         }
         Command::Skill { command } => {

@@ -462,6 +462,55 @@ impl Meshlet {
         Ok(self.graph_edges_bounded(from_id, limit)?.items)
     }
 
+    pub fn import_graph_file(
+        &self,
+        graph_path: impl AsRef<Path>,
+        source: &str,
+        namespace: &str,
+    ) -> Result<Value> {
+        if source.trim().is_empty() {
+            bail!("source must not be empty");
+        }
+        if namespace.trim().is_empty() {
+            bail!("namespace must not be empty");
+        }
+        let graph_path = graph_path.as_ref();
+        let bytes =
+            fs::read(graph_path).with_context(|| format!("read graph {}", graph_path.display()))?;
+        let graph: Value = serde_json::from_slice(&bytes).context("parse graph JSON")?;
+        let nodes = graph
+            .get("nodes")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| anyhow!("graph JSON nodes must be an array"))?;
+        let links = graph
+            .get("links")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| anyhow!("graph JSON links must be an array"))?;
+        let source_sha256 = sha256_hex(&bytes);
+        self.append_event(
+            "graph.imported",
+            "cli",
+            json!({
+                "source": source,
+                "namespace": namespace,
+                "source_path": graph_path.display().to_string(),
+                "source_sha256": source_sha256,
+                "nodes": nodes,
+                "links": links,
+            }),
+        )?;
+        Ok(json!({
+            "status": "imported",
+            "source": source,
+            "namespace": namespace,
+            "source_sha256": source_sha256,
+            "nodes": nodes.len(),
+            "edges": links.len(),
+        }))
+    }
+
     fn graph_edges_bounded(&self, from_id: Option<&str>, limit: u32) -> Result<Bounded<Value>> {
         let limit = clamp_limit(limit);
         let (sql, params_value): (&str, Vec<String>) = match from_id {
@@ -1177,6 +1226,12 @@ fn canonical_json(value: &Value) -> Result<String> {
     Ok(serde_json::to_string(value)?)
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 fn event_hash(
     id: &str,
     event_type: &str,
@@ -1737,6 +1792,36 @@ permissions = ["read_repo"]
                 .any(|edge| edge["kind"] == "references"
                     && edge["attrs"]["relation"] == "unknown_relation")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn graph_import_file_appends_event_with_digest_and_counts() -> Result<()> {
+        let dir = tempdir()?;
+        let graph_path = dir.path().join("graph.json");
+        fs::write(
+            &graph_path,
+            r#"{
+                "nodes": [
+                    {"id": "a", "label": "A"},
+                    {"id": "b", "label": "B"}
+                ],
+                "links": [
+                    {"source": "a", "target": "b", "relation": "uses"}
+                ]
+            }"#,
+        )?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        let report = meshlet.import_graph_file(&graph_path, "graphify", "graphify:repo")?;
+
+        assert_eq!(report["status"], "imported");
+        assert_eq!(report["source"], "graphify");
+        assert_eq!(report["namespace"], "graphify:repo");
+        assert_eq!(report["nodes"], 2);
+        assert_eq!(report["edges"], 1);
+        assert!(report["source_sha256"].as_str().expect("digest").len() == 64);
+        assert_eq!(meshlet.event_count()?, 2);
         Ok(())
     }
 
