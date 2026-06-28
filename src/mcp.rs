@@ -3,9 +3,15 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::{DEFAULT_LIMIT, MAX_LIMIT, Meshlet, str_field};
+use crate::{
+    DEFAULT_LIMIT, EventVisibility, MAX_LIMIT, Meshlet, OutputMode, SafetyProfile, str_field,
+};
 
 pub fn run_mcp_stdio(meshlet: Meshlet) -> Result<()> {
+    run_mcp_stdio_with_profile(meshlet, SafetyProfile::LocalTrusted)
+}
+
+pub fn run_mcp_stdio_with_profile(meshlet: Meshlet, profile: SafetyProfile) -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     for line in stdin.lock().lines() {
@@ -27,13 +33,23 @@ pub fn run_mcp_stdio(meshlet: Meshlet) -> Result<()> {
             continue;
         }
         let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let response = handle_mcp_request(&meshlet, &request, id);
+        let response = handle_mcp_request_with_profile(&meshlet, &request, id, profile);
         write_json(&mut stdout, &response)?;
     }
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn handle_mcp_request(meshlet: &Meshlet, request: &Value, id: Value) -> Value {
+    handle_mcp_request_with_profile(meshlet, request, id, SafetyProfile::LocalTrusted)
+}
+
+pub(crate) fn handle_mcp_request_with_profile(
+    meshlet: &Meshlet,
+    request: &Value,
+    id: Value,
+    profile: SafetyProfile,
+) -> Value {
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     match method {
         "initialize" => json!({
@@ -55,7 +71,7 @@ pub(crate) fn handle_mcp_request(meshlet: &Meshlet, request: &Value, id: Value) 
         }),
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-            match mcp_tool_call(meshlet, &params) {
+            match mcp_tool_call(meshlet, &params, profile) {
                 Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
                 Err(error) => json_rpc_error(id, -32602, &error.to_string()),
             }
@@ -71,7 +87,7 @@ pub(crate) fn handle_mcp_request(meshlet: &Meshlet, request: &Value, id: Value) 
                 .and_then(|params| params.get("uri"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            match mcp_read_resource(meshlet, uri) {
+            match mcp_read_resource(meshlet, uri, profile) {
                 Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
                 Err(error) => json_rpc_error(id, -32602, &error.to_string()),
             }
@@ -80,7 +96,7 @@ pub(crate) fn handle_mcp_request(meshlet: &Meshlet, request: &Value, id: Value) 
     }
 }
 
-fn mcp_tool_call(meshlet: &Meshlet, params: &Value) -> Result<Value> {
+fn mcp_tool_call(meshlet: &Meshlet, params: &Value, profile: SafetyProfile) -> Result<Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -91,29 +107,51 @@ fn mcp_tool_call(meshlet: &Meshlet, params: &Value) -> Result<Value> {
         .unwrap_or_else(|| json!({}));
     let payload = match name {
         "meshlet_publish_event" => {
+            if profile == SafetyProfile::PublicSafe {
+                bail!("meshlet_publish_event is disabled in public-safe profile");
+            }
             let event_type = str_field(&args, "type")?;
             let actor = args.get("actor").and_then(Value::as_str).unwrap_or("agent");
+            let visibility = optional_string_field(&args, "visibility")?
+                .map(str::parse::<EventVisibility>)
+                .transpose()?
+                .unwrap_or(EventVisibility::Private);
             let payload = args
                 .get("payload")
                 .filter(|payload| payload.is_object())
                 .cloned()
                 .ok_or_else(|| anyhow!("payload object is required"))?;
-            serde_json::to_value(meshlet.append_event(event_type, actor, payload)?)?
+            serde_json::to_value(
+                meshlet
+                    .append_event_with_options(event_type, actor, payload, visibility, profile)?,
+            )?
         }
         "meshlet_query" => {
             let q = str_field(&args, "q")?;
             let kind = args.get("kind").and_then(Value::as_str);
             let namespace = optional_string_field(&args, "namespace")?;
             let limit = limit_arg(&args)?;
-            meshlet.query_scoped(q, kind, namespace, limit)?
+            let mode = optional_string_field(&args, "mode")?
+                .map(str::parse::<OutputMode>)
+                .transpose()?
+                .unwrap_or(OutputMode::Compact);
+            meshlet.query_scoped_view(q, kind, namespace, limit, mode, profile)?
         }
-        "meshlet_list_skills" => json!({ "skills": meshlet.list_skills()? }),
+        "meshlet_list_skills" => json!({ "skills": meshlet.list_skills_scoped(profile)? }),
         "meshlet_list_tasks" => json!({ "tasks": meshlet.list_tasks(limit_arg(&args)?)? }),
         "meshlet_get_task" => {
             let id = str_field(&args, "id")?;
             meshlet.show_task(id)?
         }
-        "meshlet_get_context" => meshlet.context_snapshot_limited(limit_arg(&args)?)?,
+        "meshlet_get_digest" => meshlet.context_digest_limited(limit_arg(&args)?, profile)?,
+        "meshlet_get_context" => {
+            if profile == SafetyProfile::PublicSafe {
+                bail!(
+                    "meshlet_get_context is disabled in public-safe profile; use meshlet_get_digest"
+                );
+            }
+            meshlet.context_snapshot_limited(limit_arg(&args)?)?
+        }
         other => bail!("unknown tool: {other}"),
     };
     Ok(json!({
@@ -121,18 +159,11 @@ fn mcp_tool_call(meshlet: &Meshlet, params: &Value) -> Result<Value> {
     }))
 }
 
-fn mcp_read_resource(meshlet: &Meshlet, uri: &str) -> Result<Value> {
+fn mcp_read_resource(meshlet: &Meshlet, uri: &str, profile: SafetyProfile) -> Result<Value> {
     let value = match uri {
-        "meshlet://skills" => json!({ "skills": meshlet.list_skills()? }),
+        "meshlet://skills" => json!({ "skills": meshlet.list_skills_scoped(profile)? }),
         "meshlet://events/recent" => {
-            let events = meshlet.list_events_bounded(DEFAULT_LIMIT)?;
-            json!({
-                "limit": DEFAULT_LIMIT,
-                "events": {
-                    "items": events.items,
-                    "truncated": events.truncated,
-                }
-            })
+            meshlet.context_digest_limited(DEFAULT_LIMIT, profile)?["events_recent"].clone()
         }
         "meshlet://tasks" => json!({
             "limit": DEFAULT_LIMIT,
@@ -146,19 +177,7 @@ fn mcp_read_resource(meshlet: &Meshlet, uri: &str) -> Result<Value> {
             "namespaces": meshlet.graph_namespaces()?,
         }),
         "meshlet://graph" => {
-            let nodes = meshlet.graph_nodes_bounded(None, DEFAULT_LIMIT)?;
-            let edges = meshlet.graph_edges_bounded(None, DEFAULT_LIMIT)?;
-            json!({
-                "limit": DEFAULT_LIMIT,
-                "nodes": {
-                    "items": nodes.items,
-                    "truncated": nodes.truncated,
-                },
-                "edges": {
-                    "items": edges.items,
-                    "truncated": edges.truncated,
-                }
-            })
+            meshlet.context_digest_limited(DEFAULT_LIMIT, profile)?["graph"].clone()
         }
         other => bail!("unknown resource: {other}"),
     };
@@ -221,9 +240,20 @@ fn mcp_tools() -> Value {
                     "q": { "type": "string" },
                     "kind": { "type": "string", "enum": ["all", "events", "nodes", "edges"] },
                     "namespace": { "type": "string" },
+                    "mode": { "type": "string", "enum": ["compact", "full"] },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
                 },
                 "required": ["q"]
+            }
+        },
+        {
+            "name": "meshlet_get_digest",
+            "description": "Read compact public-safe Meshlet state digest.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }
             }
         },
         {

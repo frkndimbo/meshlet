@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{SecondsFormat, Utc};
@@ -13,13 +14,15 @@ use uuid::Uuid;
 mod mcp;
 
 #[cfg(test)]
-use mcp::handle_mcp_request;
-pub use mcp::run_mcp_stdio;
+use mcp::{handle_mcp_request, handle_mcp_request_with_profile};
+pub use mcp::{run_mcp_stdio, run_mcp_stdio_with_profile};
 
 pub const DB_DIR: &str = ".meshlet";
 pub const DB_FILE: &str = "meshlet.db";
 pub const DEFAULT_LIMIT: u32 = 20;
 pub const MAX_LIMIT: u32 = 100;
+const SCHEMA_VERSION: &str = "4";
+const CONTEXT_SCHEMA_VERSION: i64 = 1;
 
 const EVENT_TYPES: &[&str] = &[
     "repo.initialized",
@@ -45,6 +48,137 @@ const SECRET_KEY_DENYLIST: &[&str] = &[
 
 const ALLOWED_SKILL_PERMISSIONS: &[&str] = &["read_repo", "read_files", "write_docs", "run_check"];
 
+const SECRET_VALUE_MARKERS: &[&str] = &[
+    "bearer ",
+    "begin private key",
+    "begin rsa private key",
+    "begin openSSH private key",
+    "ghp_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "sk-",
+];
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EventVisibility {
+    Private,
+    Local,
+    Public,
+}
+
+impl Default for EventVisibility {
+    fn default() -> Self {
+        Self::Private
+    }
+}
+
+impl EventVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Local => "local",
+            Self::Public => "public",
+        }
+    }
+
+    fn from_db(value: Option<&str>) -> Self {
+        match value {
+            Some("local") => Self::Local,
+            Some("public") => Self::Public,
+            _ => Self::Private,
+        }
+    }
+}
+
+impl FromStr for EventVisibility {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "private" => Ok(Self::Private),
+            "local" => Ok(Self::Local),
+            "public" => Ok(Self::Public),
+            _ => bail!("visibility must be private, local, or public"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputMode {
+    Compact,
+    Full,
+}
+
+impl Default for OutputMode {
+    fn default() -> Self {
+        Self::Compact
+    }
+}
+
+impl FromStr for OutputMode {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "compact" => Ok(Self::Compact),
+            "full" => Ok(Self::Full),
+            _ => bail!("mode must be compact or full"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SafetyProfile {
+    LocalTrusted,
+    PublicSafe,
+}
+
+impl Default for SafetyProfile {
+    fn default() -> Self {
+        Self::LocalTrusted
+    }
+}
+
+impl SafetyProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalTrusted => "local-trusted",
+            Self::PublicSafe => "public-safe",
+        }
+    }
+}
+
+impl FromStr for SafetyProfile {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "local-trusted" => Ok(Self::LocalTrusted),
+            "public-safe" => Ok(Self::PublicSafe),
+            _ => bail!("profile must be local-trusted or public-safe"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RedactionReport {
+    pub blocked_keys: Vec<String>,
+    pub suspicious_values: Vec<String>,
+    pub output_redactions: u64,
+}
+
+impl RedactionReport {
+    fn merge(&mut self, other: RedactionReport) {
+        self.blocked_keys.extend(other.blocked_keys);
+        self.suspicious_values.extend(other.suspicious_values);
+        self.output_redactions += other.output_redactions;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Event {
     pub id: String,
@@ -52,6 +186,8 @@ pub struct Event {
     pub event_type: String,
     pub created_at: String,
     pub actor: String,
+    #[serde(default)]
+    pub visibility: EventVisibility,
     pub payload: Value,
     pub hash: String,
     pub prev_hash: Option<String>,
@@ -127,6 +263,7 @@ impl Meshlet {
     }
 
     fn apply_schema(&self) -> Result<()> {
+        let had_contexts = self.has_table("contexts")?;
         self.conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
@@ -141,6 +278,7 @@ impl Meshlet {
                 created_at TEXT NOT NULL,
                 actor TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private',
                 hash TEXT NOT NULL UNIQUE,
                 prev_hash TEXT
             );
@@ -149,7 +287,8 @@ impl Meshlet {
                 kind TEXT NOT NULL,
                 label TEXT,
                 attrs_json TEXT NOT NULL,
-                source_event_id TEXT NOT NULL
+                source_event_id TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private'
             );
             CREATE TABLE IF NOT EXISTS graph_edges (
                 id TEXT PRIMARY KEY,
@@ -157,7 +296,8 @@ impl Meshlet {
                 to_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 attrs_json TEXT NOT NULL,
-                source_event_id TEXT NOT NULL
+                source_event_id TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private'
             );
             CREATE TABLE IF NOT EXISTS skills (
                 name TEXT PRIMARY KEY,
@@ -166,12 +306,93 @@ impl Meshlet {
                 entry TEXT NOT NULL,
                 permissions_json TEXT NOT NULL,
                 description TEXT,
-                source_event_id TEXT NOT NULL
+                source_event_id TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private'
             );
-            INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '1');
+            CREATE TABLE IF NOT EXISTS contexts (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                namespace TEXT,
+                title TEXT,
+                summary TEXT NOT NULL,
+                visibility TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                attrs_json TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_contexts_visibility_created_at
+                ON contexts(visibility, created_at);
+            CREATE INDEX IF NOT EXISTS idx_contexts_source_event_id
+                ON contexts(source_event_id);
             "#,
         )?;
+        if !self.has_column("events", "visibility")? {
+            self.conn.execute(
+                "ALTER TABLE events ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
+                [],
+            )?;
+        }
+        let needs_read_model_visibility = self.ensure_read_model_visibility_columns()?;
+        self.conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_graph_nodes_visibility
+                ON graph_nodes(visibility);
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_visibility
+                ON graph_edges(visibility);
+            CREATE INDEX IF NOT EXISTS idx_skills_visibility
+                ON skills(visibility);
+            "#,
+        )?;
+        if needs_read_model_visibility {
+            self.backfill_read_model_visibility()?;
+        }
+        if !had_contexts {
+            self.backfill_contexts_from_events()?;
+        }
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?1)",
+            [SCHEMA_VERSION],
+        )?;
         Ok(())
+    }
+
+    fn ensure_read_model_visibility_columns(&self) -> Result<bool> {
+        let mut changed = false;
+        for table in ["graph_nodes", "graph_edges", "skills"] {
+            if !self.has_column(table, "visibility")? {
+                self.conn.execute(
+                    &format!(
+                        "ALTER TABLE {table} ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'"
+                    ),
+                    [],
+                )?;
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
+    fn has_table(&self, table: &str) -> Result<bool> {
+        let exists = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        Ok(exists)
+    }
+
+    fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(columns.iter().any(|name| name == column))
     }
 
     pub fn event_count(&self) -> Result<u64> {
@@ -183,7 +404,7 @@ impl Meshlet {
 
     pub fn verify_event_chain(&self) -> Result<VerificationReport> {
         let mut stmt = self.conn.prepare(
-            "SELECT seq, id, type, created_at, actor, payload_json, hash, prev_hash
+            "SELECT seq, id, type, created_at, actor, payload_json, visibility, hash, prev_hash
              FROM events ORDER BY seq ASC",
         )?;
         let rows = stmt
@@ -233,11 +454,28 @@ impl Meshlet {
     }
 
     pub fn append_event(&self, event_type: &str, actor: &str, payload: Value) -> Result<Event> {
+        self.append_event_with_options(
+            event_type,
+            actor,
+            payload,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )
+    }
+
+    pub fn append_event_with_options(
+        &self,
+        event_type: &str,
+        actor: &str,
+        payload: Value,
+        visibility: EventVisibility,
+        profile: SafetyProfile,
+    ) -> Result<Event> {
         validate_event_type(event_type)?;
         if actor.trim().is_empty() {
             bail!("actor must not be empty");
         }
-        validate_no_secret_keys(&payload)?;
+        validate_payload_safety(&payload, profile)?;
         validate_event_payload(event_type, &payload)?;
         let prev_hash = self.latest_hash()?;
         let id = Uuid::new_v4().to_string();
@@ -252,8 +490,8 @@ impl Meshlet {
         )?;
         let next_seq = self.next_seq()?;
         self.conn.execute(
-            "INSERT INTO events(id, seq, type, created_at, actor, payload_json, hash, prev_hash)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO events(id, seq, type, created_at, actor, payload_json, visibility, hash, prev_hash)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id,
                 next_seq,
@@ -261,6 +499,7 @@ impl Meshlet {
                 created_at,
                 actor,
                 canonical_json(&payload)?,
+                visibility.as_str(),
                 hash,
                 prev_hash
             ],
@@ -275,7 +514,7 @@ impl Meshlet {
     pub fn list_events(&self, limit: u32) -> Result<Vec<Event>> {
         let limit = clamp_limit(limit);
         let mut stmt = self.conn.prepare(
-            "SELECT id, type, created_at, actor, payload_json, hash, prev_hash
+            "SELECT id, type, created_at, actor, payload_json, visibility, hash, prev_hash
              FROM events ORDER BY seq DESC LIMIT ?1",
         )?;
         let events = stmt
@@ -287,7 +526,7 @@ impl Meshlet {
     fn list_events_bounded(&self, limit: u32) -> Result<Bounded<Event>> {
         let limit = clamp_limit(limit);
         let mut stmt = self.conn.prepare(
-            "SELECT id, type, created_at, actor, payload_json, hash, prev_hash
+            "SELECT id, type, created_at, actor, payload_json, visibility, hash, prev_hash
              FROM events ORDER BY seq DESC LIMIT ?1",
         )?;
         let mut events = stmt
@@ -304,7 +543,7 @@ impl Meshlet {
     pub fn show_event(&self, id: &str) -> Result<Event> {
         self.conn
             .query_row(
-                "SELECT id, type, created_at, actor, payload_json, hash, prev_hash
+                "SELECT id, type, created_at, actor, payload_json, visibility, hash, prev_hash
                  FROM events WHERE id = ?1",
                 [id],
                 event_from_row,
@@ -332,45 +571,61 @@ impl Meshlet {
     }
 
     pub fn list_skills(&self) -> Result<Vec<Value>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT name, version, manifest_path, entry, permissions_json, description, source_event_id
-             FROM skills ORDER BY name",
-        )?;
-        let skills = stmt
-            .query_map([], |row| {
-                let permissions: String = row.get(4)?;
-                Ok(json!({
-                    "name": row.get::<_, String>(0)?,
-                    "version": row.get::<_, String>(1)?,
-                    "manifest_path": row.get::<_, String>(2)?,
-                    "entry": row.get::<_, String>(3)?,
-                    "permissions": serde_json::from_str::<Value>(&permissions).unwrap_or_else(|_| json!([])),
-                    "description": row.get::<_, Option<String>>(5)?,
-                    "source_event_id": row.get::<_, String>(6)?,
-                }))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(skills)
+        self.list_skills_scoped(SafetyProfile::LocalTrusted)
+    }
+
+    pub fn list_skills_scoped(&self, profile: SafetyProfile) -> Result<Vec<Value>> {
+        Ok(self.skills_bounded(None, profile)?.items)
+    }
+
+    pub fn list_skills_limited(&self, limit: u32, profile: SafetyProfile) -> Result<Vec<Value>> {
+        Ok(self.skills_bounded(Some(limit), profile)?.items)
+    }
+
+    fn skills_bounded(&self, limit: Option<u32>, profile: SafetyProfile) -> Result<Bounded<Value>> {
+        let visibility = visibility_clause(profile);
+        let limit = limit.map(clamp_limit);
+        let sql = if limit.is_some() {
+            format!(
+                "SELECT name, version, manifest_path, entry, permissions_json, description, source_event_id, visibility
+                 FROM skills
+                 WHERE {visibility}
+                 ORDER BY name
+                 LIMIT ?1"
+            )
+        } else {
+            format!(
+                "SELECT name, version, manifest_path, entry, permissions_json, description, source_event_id, visibility
+                 FROM skills
+                 WHERE {visibility}
+                 ORDER BY name"
+            )
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut skills = if let Some(limit) = limit {
+            stmt.query_map([limit + 1], skill_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map([], skill_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let truncated = limit.is_some_and(|limit| skills.len() > limit as usize);
+        if let Some(limit) = limit {
+            skills.truncate(limit as usize);
+        }
+        Ok(Bounded {
+            items: skills,
+            truncated,
+        })
     }
 
     pub fn show_skill(&self, name: &str) -> Result<Value> {
         self.conn
             .query_row(
-                "SELECT name, version, manifest_path, entry, permissions_json, description, source_event_id
+                "SELECT name, version, manifest_path, entry, permissions_json, description, source_event_id, visibility
                  FROM skills WHERE name = ?1",
                 [name],
-                |row| {
-                    let permissions: String = row.get(4)?;
-                    Ok(json!({
-                        "name": row.get::<_, String>(0)?,
-                        "version": row.get::<_, String>(1)?,
-                        "manifest_path": row.get::<_, String>(2)?,
-                        "entry": row.get::<_, String>(3)?,
-                        "permissions": serde_json::from_str::<Value>(&permissions).unwrap_or_else(|_| json!([])),
-                        "description": row.get::<_, Option<String>>(5)?,
-                        "source_event_id": row.get::<_, String>(6)?,
-                    }))
-                },
+                skill_from_row,
             )
             .optional()?
             .ok_or_else(|| anyhow!("skill not found: {name}"))
@@ -402,7 +657,7 @@ impl Meshlet {
         };
         self.conn
             .query_row(
-                "SELECT id, kind, label, attrs_json, source_event_id
+                "SELECT id, kind, label, attrs_json, source_event_id, visibility
                  FROM graph_nodes WHERE id = ?1 AND kind = 'evidence'",
                 [node_id.as_str()],
                 node_from_row,
@@ -468,6 +723,11 @@ impl Meshlet {
     }
 
     pub fn rebuild_graph(&self) -> Result<()> {
+        self.rebuild_read_models()
+    }
+
+    fn rebuild_read_models(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM contexts", [])?;
         self.conn.execute("DELETE FROM graph_edges", [])?;
         self.conn.execute("DELETE FROM graph_nodes", [])?;
         self.conn.execute("DELETE FROM skills", [])?;
@@ -478,27 +738,106 @@ impl Meshlet {
         Ok(())
     }
 
+    pub fn list_contexts_limited(&self, limit: u32, profile: SafetyProfile) -> Result<Vec<Value>> {
+        Ok(self.contexts_bounded(None, limit, profile)?.items)
+    }
+
+    pub fn search_contexts(&self, q: &str, limit: u32, profile: SafetyProfile) -> Result<Value> {
+        let needle = q.trim().to_lowercase();
+        if needle.is_empty() {
+            bail!("query must not be empty");
+        }
+        let bounded = self.contexts_bounded(Some(&needle), limit, profile)?;
+        Ok(json!({
+            "q": q,
+            "limit": clamp_limit(limit),
+            "contexts": {
+                "items": bounded.items,
+                "truncated": bounded.truncated,
+            },
+        }))
+    }
+
+    fn contexts_bounded(
+        &self,
+        needle: Option<&str>,
+        limit: u32,
+        profile: SafetyProfile,
+    ) -> Result<Bounded<Value>> {
+        let limit = clamp_limit(limit);
+        let visibility = visibility_clause(profile);
+        let sql = if needle.is_some() {
+            format!(
+                "SELECT id, kind, namespace, title, summary, visibility, source_event_id, created_at, updated_at, schema_version, attrs_json
+                 FROM contexts
+                 WHERE {visibility}
+                   AND (instr(lower(kind), ?1) > 0
+                    OR instr(lower(coalesce(namespace, '')), ?1) > 0
+                    OR instr(lower(coalesce(title, '')), ?1) > 0
+                    OR instr(lower(summary), ?1) > 0)
+                 ORDER BY created_at DESC, id
+                 LIMIT ?2"
+            )
+        } else {
+            format!(
+                "SELECT id, kind, namespace, title, summary, visibility, source_event_id, created_at, updated_at, schema_version, attrs_json
+                 FROM contexts
+                 WHERE {visibility}
+                 ORDER BY created_at DESC, id
+                 LIMIT ?1"
+            )
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut contexts = if let Some(needle) = needle {
+            stmt.query_map(params![needle, limit + 1], context_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map([limit + 1], context_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let truncated = contexts.len() > limit as usize;
+        contexts.truncate(limit as usize);
+        Ok(Bounded {
+            items: contexts,
+            truncated,
+        })
+    }
+
     pub fn graph_nodes(&self, kind: Option<&str>) -> Result<Vec<Value>> {
-        Ok(self.graph_nodes_bounded(kind, DEFAULT_LIMIT)?.items)
+        Ok(self
+            .graph_nodes_bounded(kind, DEFAULT_LIMIT, SafetyProfile::LocalTrusted)?
+            .items)
     }
 
     pub fn graph_nodes_limited(&self, kind: Option<&str>, limit: u32) -> Result<Vec<Value>> {
-        Ok(self.graph_nodes_bounded(kind, limit)?.items)
+        Ok(self
+            .graph_nodes_bounded(kind, limit, SafetyProfile::LocalTrusted)?
+            .items)
     }
 
-    fn graph_nodes_bounded(&self, kind: Option<&str>, limit: u32) -> Result<Bounded<Value>> {
+    fn graph_nodes_bounded(
+        &self,
+        kind: Option<&str>,
+        limit: u32,
+        profile: SafetyProfile,
+    ) -> Result<Bounded<Value>> {
         let limit = clamp_limit(limit);
-        let (sql, params_value): (&str, Vec<String>) = match kind {
+        let visibility = visibility_clause(profile);
+        let (sql, params_value): (String, Vec<String>) = match kind {
             Some(kind) => (
-                "SELECT id, kind, label, attrs_json, source_event_id FROM graph_nodes WHERE kind = ?1 ORDER BY id LIMIT ?2",
+                format!(
+                    "SELECT id, kind, label, attrs_json, source_event_id, visibility FROM graph_nodes WHERE {visibility} AND kind = ?1 ORDER BY id LIMIT ?2"
+                ),
                 vec![kind.to_string(), (limit + 1).to_string()],
             ),
             None => (
-                "SELECT id, kind, label, attrs_json, source_event_id FROM graph_nodes ORDER BY id LIMIT ?1",
+                format!(
+                    "SELECT id, kind, label, attrs_json, source_event_id, visibility FROM graph_nodes WHERE {visibility} ORDER BY id LIMIT ?1"
+                ),
                 vec![(limit + 1).to_string()],
             ),
         };
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut nodes = stmt
             .query_map(rusqlite::params_from_iter(params_value), node_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -511,11 +850,15 @@ impl Meshlet {
     }
 
     pub fn graph_edges(&self, from_id: Option<&str>) -> Result<Vec<Value>> {
-        Ok(self.graph_edges_bounded(from_id, DEFAULT_LIMIT)?.items)
+        Ok(self
+            .graph_edges_bounded(from_id, DEFAULT_LIMIT, SafetyProfile::LocalTrusted)?
+            .items)
     }
 
     pub fn graph_edges_limited(&self, from_id: Option<&str>, limit: u32) -> Result<Vec<Value>> {
-        Ok(self.graph_edges_bounded(from_id, limit)?.items)
+        Ok(self
+            .graph_edges_bounded(from_id, limit, SafetyProfile::LocalTrusted)?
+            .items)
     }
 
     pub fn graph_namespaces(&self) -> Result<Vec<String>> {
@@ -585,19 +928,73 @@ impl Meshlet {
         }))
     }
 
-    fn graph_edges_bounded(&self, from_id: Option<&str>, limit: u32) -> Result<Bounded<Value>> {
+    pub fn context_digest_limited(&self, limit: u32, profile: SafetyProfile) -> Result<Value> {
         let limit = clamp_limit(limit);
-        let (sql, params_value): (&str, Vec<String>) = match from_id {
+        let events = self.list_events_bounded(limit)?;
+        let event_items = events
+            .items
+            .iter()
+            .filter(|event| {
+                profile != SafetyProfile::PublicSafe || event.visibility == EventVisibility::Public
+            })
+            .map(compact_event)
+            .collect::<Vec<_>>();
+        let nodes = self.graph_nodes_bounded(None, limit, profile)?;
+        let edges = self.graph_edges_bounded(None, limit, profile)?;
+        Ok(json!({
+            "root": self.root.display().to_string(),
+            "profile": match profile {
+                SafetyProfile::LocalTrusted => "local-trusted",
+                SafetyProfile::PublicSafe => "public-safe",
+            },
+            "limit": limit,
+            "counts": {
+                "events": self.event_count()?,
+                "skills": self.list_skills_scoped(profile)?.len(),
+                "tasks": self.list_tasks(limit)?.len(),
+                "namespaces": self.graph_namespaces()?.len(),
+            },
+            "events_recent": {
+                "items": event_items,
+                "truncated": events.truncated,
+            },
+            "tasks": self.list_tasks(limit)?,
+            "graph": {
+                "nodes": {
+                    "items": nodes.items.into_iter().map(compact_node).collect::<Vec<_>>(),
+                    "truncated": nodes.truncated,
+                },
+                "edges": {
+                    "items": edges.items.into_iter().map(compact_edge).collect::<Vec<_>>(),
+                    "truncated": edges.truncated,
+                },
+            }
+        }))
+    }
+
+    fn graph_edges_bounded(
+        &self,
+        from_id: Option<&str>,
+        limit: u32,
+        profile: SafetyProfile,
+    ) -> Result<Bounded<Value>> {
+        let limit = clamp_limit(limit);
+        let visibility = visibility_clause(profile);
+        let (sql, params_value): (String, Vec<String>) = match from_id {
             Some(from_id) => (
-                "SELECT id, from_id, to_id, kind, attrs_json, source_event_id FROM graph_edges WHERE from_id = ?1 ORDER BY id LIMIT ?2",
+                format!(
+                    "SELECT id, from_id, to_id, kind, attrs_json, source_event_id, visibility FROM graph_edges WHERE {visibility} AND from_id = ?1 ORDER BY id LIMIT ?2"
+                ),
                 vec![from_id.to_string(), (limit + 1).to_string()],
             ),
             None => (
-                "SELECT id, from_id, to_id, kind, attrs_json, source_event_id FROM graph_edges ORDER BY id LIMIT ?1",
+                format!(
+                    "SELECT id, from_id, to_id, kind, attrs_json, source_event_id, visibility FROM graph_edges WHERE {visibility} ORDER BY id LIMIT ?1"
+                ),
                 vec![(limit + 1).to_string()],
             ),
         };
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut edges = stmt
             .query_map(rusqlite::params_from_iter(params_value), edge_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -616,8 +1013,8 @@ impl Meshlet {
     pub fn context_snapshot_limited(&self, limit: u32) -> Result<Value> {
         let limit = clamp_limit(limit);
         let events = self.list_events_bounded(limit)?;
-        let nodes = self.graph_nodes_bounded(None, limit)?;
-        let edges = self.graph_edges_bounded(None, limit)?;
+        let nodes = self.graph_nodes_bounded(None, limit, SafetyProfile::LocalTrusted)?;
+        let edges = self.graph_edges_bounded(None, limit, SafetyProfile::LocalTrusted)?;
         Ok(json!({
             "root": self.root.display().to_string(),
             "limit": limit,
@@ -652,6 +1049,17 @@ impl Meshlet {
         namespace: Option<&str>,
         limit: u32,
     ) -> Result<Value> {
+        self.query_scoped_with_profile(q, kind, namespace, limit, SafetyProfile::LocalTrusted)
+    }
+
+    fn query_scoped_with_profile(
+        &self,
+        q: &str,
+        kind: Option<&str>,
+        namespace: Option<&str>,
+        limit: u32,
+        profile: SafetyProfile,
+    ) -> Result<Value> {
         let needle = q.trim().to_lowercase();
         if needle.is_empty() {
             bail!("query must not be empty");
@@ -670,12 +1078,12 @@ impl Meshlet {
             None
         };
         let nodes = if matches!(kind, "all" | "nodes") {
-            Some(self.query_nodes(&needle, namespace, limit)?)
+            Some(self.query_nodes(&needle, namespace, limit, profile)?)
         } else {
             None
         };
         let edges = if matches!(kind, "all" | "edges") {
-            Some(self.query_edges(&needle, namespace, limit)?)
+            Some(self.query_edges(&needle, namespace, limit, profile)?)
         } else {
             None
         };
@@ -700,10 +1108,96 @@ impl Meshlet {
         }))
     }
 
+    pub fn query_scoped_view(
+        &self,
+        q: &str,
+        kind: Option<&str>,
+        namespace: Option<&str>,
+        limit: u32,
+        mode: OutputMode,
+        profile: SafetyProfile,
+    ) -> Result<Value> {
+        if profile == SafetyProfile::PublicSafe && mode == OutputMode::Full {
+            bail!("full output mode is not allowed in public-safe profile");
+        }
+        let value = self.query_scoped_with_profile(q, kind, namespace, limit, profile)?;
+        if mode == OutputMode::Full && profile == SafetyProfile::LocalTrusted {
+            return Ok(value);
+        }
+        Ok(compact_query(value, profile))
+    }
+
+    pub fn public_export(&self, limit: u32) -> Result<Value> {
+        let limit = clamp_limit(limit);
+        let events = self
+            .list_events(limit)?
+            .into_iter()
+            .filter(|event| event.visibility == EventVisibility::Public)
+            .map(|event| compact_event(&event))
+            .collect::<Vec<_>>();
+        let nodes = filter_public_values(
+            self.graph_nodes_limited(None, limit)?,
+            SafetyProfile::PublicSafe,
+        )
+        .into_iter()
+        .map(compact_node)
+        .collect::<Vec<_>>();
+        let edges = filter_public_values(
+            self.graph_edges_limited(None, limit)?,
+            SafetyProfile::PublicSafe,
+        )
+        .into_iter()
+        .map(compact_edge)
+        .collect::<Vec<_>>();
+        Ok(json!({
+            "format": "meshlet-public-export-v1",
+            "profile": "public-safe",
+            "limit": limit,
+            "events": events,
+            "graph": {
+                "nodes": nodes,
+                "edges": edges,
+            },
+            "redaction_report": self.public_doctor()?["redaction_report"].clone(),
+        }))
+    }
+
+    pub fn public_doctor(&self) -> Result<Value> {
+        let chain = self.verify_event_chain()?;
+        let events = self.events_ascending()?;
+        let mut report = RedactionReport::default();
+        let mut visibility_counts: BTreeMap<String, u64> = BTreeMap::new();
+        for event in &events {
+            *visibility_counts
+                .entry(event.visibility.as_str().to_string())
+                .or_insert(0) += 1;
+            report.merge(scan_payload_safety(&event.payload));
+        }
+        for node in self.graph_nodes_limited(None, MAX_LIMIT)? {
+            if let Some(attrs) = node.get("attrs") {
+                report.merge(scan_payload_safety(attrs));
+            }
+        }
+        for edge in self.graph_edges_limited(None, MAX_LIMIT)? {
+            if let Some(attrs) = edge.get("attrs") {
+                report.merge(scan_payload_safety(attrs));
+            }
+        }
+        let ok = chain.ok && report.blocked_keys.is_empty() && report.suspicious_values.is_empty();
+        Ok(json!({
+            "ok": ok,
+            "chain": chain,
+            "events": events.len(),
+            "visibility": visibility_counts,
+            "redaction_report": report,
+            "blockers": if ok { json!([]) } else { json!(["stored state is not public-safe"]) },
+        }))
+    }
+
     fn query_events(&self, needle: &str, limit: u32) -> Result<Bounded<Event>> {
         let limit = clamp_limit(limit);
         let mut stmt = self.conn.prepare(
-            "SELECT id, type, created_at, actor, payload_json, hash, prev_hash
+            "SELECT id, type, created_at, actor, payload_json, visibility, hash, prev_hash
              FROM events
              WHERE instr(lower(type), ?1) > 0
                 OR instr(lower(actor), ?1) > 0
@@ -727,30 +1221,38 @@ impl Meshlet {
         needle: &str,
         namespace: Option<&str>,
         limit: u32,
+        profile: SafetyProfile,
     ) -> Result<Bounded<Value>> {
         let limit = clamp_limit(limit);
+        let visibility = visibility_clause(profile);
         let namespace_filter = namespace.map(namespace_json_fragment).transpose()?;
         let sql = if namespace_filter.is_some() {
-            "SELECT id, kind, label, attrs_json, source_event_id
+            format!(
+                "SELECT id, kind, label, attrs_json, source_event_id, visibility
              FROM graph_nodes
-             WHERE (instr(lower(id), ?1) > 0
+             WHERE {visibility}
+               AND (instr(lower(id), ?1) > 0
                 OR instr(lower(kind), ?1) > 0
                 OR instr(lower(coalesce(label, '')), ?1) > 0
                 OR instr(lower(attrs_json), ?1) > 0)
                AND instr(attrs_json, ?2) > 0
              ORDER BY id
              LIMIT ?3"
+            )
         } else {
-            "SELECT id, kind, label, attrs_json, source_event_id
+            format!(
+                "SELECT id, kind, label, attrs_json, source_event_id, visibility
              FROM graph_nodes
-             WHERE instr(lower(id), ?1) > 0
+             WHERE {visibility}
+               AND (instr(lower(id), ?1) > 0
                 OR instr(lower(kind), ?1) > 0
                 OR instr(lower(coalesce(label, '')), ?1) > 0
-                OR instr(lower(attrs_json), ?1) > 0
+                OR instr(lower(attrs_json), ?1) > 0)
              ORDER BY id
              LIMIT ?2"
+            )
         };
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut nodes = if let Some(filter) = namespace_filter {
             stmt.query_map(params![needle, filter, limit + 1], node_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -771,13 +1273,17 @@ impl Meshlet {
         needle: &str,
         namespace: Option<&str>,
         limit: u32,
+        profile: SafetyProfile,
     ) -> Result<Bounded<Value>> {
         let limit = clamp_limit(limit);
+        let visibility = visibility_clause(profile);
         let namespace_filter = namespace.map(namespace_json_fragment).transpose()?;
         let sql = if namespace_filter.is_some() {
-            "SELECT id, from_id, to_id, kind, attrs_json, source_event_id
+            format!(
+                "SELECT id, from_id, to_id, kind, attrs_json, source_event_id, visibility
              FROM graph_edges
-             WHERE (instr(lower(id), ?1) > 0
+             WHERE {visibility}
+               AND (instr(lower(id), ?1) > 0
                 OR instr(lower(from_id), ?1) > 0
                 OR instr(lower(to_id), ?1) > 0
                 OR instr(lower(kind), ?1) > 0
@@ -785,18 +1291,22 @@ impl Meshlet {
                AND instr(attrs_json, ?2) > 0
              ORDER BY id
              LIMIT ?3"
+            )
         } else {
-            "SELECT id, from_id, to_id, kind, attrs_json, source_event_id
+            format!(
+                "SELECT id, from_id, to_id, kind, attrs_json, source_event_id, visibility
              FROM graph_edges
-             WHERE instr(lower(id), ?1) > 0
+             WHERE {visibility}
+               AND (instr(lower(id), ?1) > 0
                 OR instr(lower(from_id), ?1) > 0
                 OR instr(lower(to_id), ?1) > 0
                 OR instr(lower(kind), ?1) > 0
-                OR instr(lower(attrs_json), ?1) > 0
+                OR instr(lower(attrs_json), ?1) > 0)
              ORDER BY id
              LIMIT ?2"
+            )
         };
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut edges = if let Some(filter) = namespace_filter {
             stmt.query_map(params![needle, filter, limit + 1], edge_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -870,7 +1380,7 @@ impl Meshlet {
         let event = self
             .conn
             .query_row(
-                "SELECT id, type, created_at, actor, payload_json, hash, prev_hash
+                "SELECT id, type, created_at, actor, payload_json, visibility, hash, prev_hash
                  FROM events WHERE seq = ?1",
                 [seq],
                 event_from_row,
@@ -881,7 +1391,7 @@ impl Meshlet {
 
     fn events_ascending(&self) -> Result<Vec<Event>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, type, created_at, actor, payload_json, hash, prev_hash
+            "SELECT id, type, created_at, actor, payload_json, visibility, hash, prev_hash
              FROM events ORDER BY seq ASC",
         )?;
         let events = stmt
@@ -902,18 +1412,21 @@ impl Meshlet {
                     "repo:current",
                     "repo",
                     Some(root),
-                    json!({ "root": root }),
+                    json!({ "root": root, "visibility": event.visibility.as_str() }),
                     &event.id,
+                    event.visibility,
                 )?;
             }
             "skill.added" => self.apply_skill_added(event)?,
             "context.added" => {
+                self.apply_context_added(event)?;
                 self.upsert_node(
                     &format!("context:{}", event.id),
                     "context",
                     event.payload.get("label").and_then(Value::as_str),
-                    event.payload.clone(),
+                    attrs_with_visibility(event.payload.clone(), event.visibility),
                     &event.id,
+                    event.visibility,
                 )?;
             }
             "agent.message" => self.apply_agent_message(event)?,
@@ -922,6 +1435,38 @@ impl Meshlet {
             "graph.imported" => self.apply_graph_imported(event)?,
             _ => {}
         }
+        Ok(())
+    }
+
+    fn apply_context_added(&self, event: &Event) -> Result<()> {
+        let kind = nonempty_string(&event.payload, "kind").unwrap_or("context");
+        let namespace = nonempty_string(&event.payload, "namespace");
+        let title = nonempty_string(&event.payload, "title")
+            .or_else(|| nonempty_string(&event.payload, "label"));
+        let summary = nonempty_string(&event.payload, "summary")
+            .or_else(|| nonempty_string(&event.payload, "label"))
+            .or_else(|| nonempty_string(&event.payload, "title"))
+            .unwrap_or("context.added");
+        self.conn.execute(
+            "INSERT OR REPLACE INTO contexts(
+                id, kind, namespace, title, summary, visibility, source_event_id,
+                created_at, updated_at, schema_version, attrs_json
+             )
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                format!("context:{}", event.id),
+                kind,
+                namespace,
+                title,
+                summary,
+                event.visibility.as_str(),
+                event.id,
+                event.created_at,
+                event.created_at,
+                CONTEXT_SCHEMA_VERSION,
+                canonical_json(&event.payload)?,
+            ],
+        )?;
         Ok(())
     }
 
@@ -937,8 +1482,8 @@ impl Meshlet {
             .unwrap_or_else(|| json!([]));
         let description = event.payload.get("description").and_then(Value::as_str);
         self.conn.execute(
-            "INSERT OR REPLACE INTO skills(name, version, manifest_path, entry, permissions_json, description, source_event_id)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO skills(name, version, manifest_path, entry, permissions_json, description, source_event_id, visibility)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 name,
                 version,
@@ -946,7 +1491,8 @@ impl Meshlet {
                 entry,
                 canonical_json(&permissions)?,
                 description,
-                event.id
+                event.id,
+                event.visibility.as_str(),
             ],
         )?;
         let skill_id = format!("skill:{name}");
@@ -961,6 +1507,7 @@ impl Meshlet {
                 "description": description,
             }),
             &event.id,
+            event.visibility,
         )?;
         let file_id = format!("file:{entry}");
         self.upsert_node(
@@ -969,6 +1516,7 @@ impl Meshlet {
             Some(entry),
             json!({ "path": entry }),
             &event.id,
+            event.visibility,
         )?;
         self.upsert_edge(
             &format!("edge:{}:skill-entry", event.id),
@@ -977,6 +1525,7 @@ impl Meshlet {
             "references",
             json!({ "field": "entry" }),
             &event.id,
+            event.visibility,
         )?;
         Ok(())
     }
@@ -995,13 +1544,15 @@ impl Meshlet {
             Some(agent),
             json!({ "name": agent }),
             &event.id,
+            event.visibility,
         )?;
         self.upsert_node(
             &message_id,
             "message",
             event.payload.get("summary").and_then(Value::as_str),
-            event.payload.clone(),
+            attrs_with_visibility(event.payload.clone(), event.visibility),
             &event.id,
+            event.visibility,
         )?;
         self.upsert_edge(
             &format!("edge:{}:agent-message", event.id),
@@ -1010,6 +1561,7 @@ impl Meshlet {
             "produced",
             json!({}),
             &event.id,
+            event.visibility,
         )?;
         Ok(())
     }
@@ -1027,8 +1579,9 @@ impl Meshlet {
             &evidence_id,
             "evidence",
             event.payload.get("note").and_then(Value::as_str),
-            event.payload.clone(),
+            attrs_with_visibility(event.payload.clone(), event.visibility),
             &event.id,
+            event.visibility,
         )?;
         self.upsert_node(
             &file_id,
@@ -1036,6 +1589,7 @@ impl Meshlet {
             Some(path),
             json!({ "path": path }),
             &event.id,
+            event.visibility,
         )?;
         self.upsert_edge(
             &format!("edge:{}:evidence-file", event.id),
@@ -1044,6 +1598,7 @@ impl Meshlet {
             "references",
             json!({}),
             &event.id,
+            event.visibility,
         )?;
         if let Some(task_id) = event.payload.get("task_id").and_then(Value::as_str) {
             self.upsert_edge(
@@ -1053,6 +1608,7 @@ impl Meshlet {
                 "supports",
                 json!({}),
                 &event.id,
+                event.visibility,
             )?;
         }
         Ok(())
@@ -1069,8 +1625,9 @@ impl Meshlet {
             &format!("task:{task_id}"),
             "task",
             event.payload.get("title").and_then(Value::as_str),
-            event.payload.clone(),
+            attrs_with_visibility(event.payload.clone(), event.visibility),
             &event.id,
+            event.visibility,
         )?;
         Ok(())
     }
@@ -1097,10 +1654,18 @@ impl Meshlet {
             attrs.insert("namespace".to_string(), json!(namespace));
             attrs.insert("source".to_string(), json!(source));
             attrs.insert("external_id".to_string(), json!(external_id));
+            attrs.insert("visibility".to_string(), json!(event.visibility.as_str()));
             if let Some(origin) = attrs.remove("_origin") {
                 attrs.insert("origin".to_string(), origin);
             }
-            self.upsert_node(&node_id, "imported", label, Value::Object(attrs), &event.id)?;
+            self.upsert_node(
+                &node_id,
+                "imported",
+                label,
+                Value::Object(attrs),
+                &event.id,
+                event.visibility,
+            )?;
         }
 
         for (index, link) in links.iter().enumerate() {
@@ -1116,6 +1681,7 @@ impl Meshlet {
             attrs.insert("namespace".to_string(), json!(namespace));
             attrs.insert("source".to_string(), json!(source));
             attrs.insert("relation".to_string(), json!(relation));
+            attrs.insert("visibility".to_string(), json!(event.visibility.as_str()));
             self.upsert_edge(
                 &format!("edge:{}:graphify:{index}", event.id),
                 &from_id,
@@ -1123,6 +1689,7 @@ impl Meshlet {
                 graph_import_edge_kind(relation),
                 Value::Object(attrs),
                 &event.id,
+                event.visibility,
             )?;
         }
         Ok(())
@@ -1135,11 +1702,19 @@ impl Meshlet {
         label: Option<&str>,
         attrs: Value,
         source_event_id: &str,
+        visibility: EventVisibility,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO graph_nodes(id, kind, label, attrs_json, source_event_id)
-             VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![id, kind, label, canonical_json(&attrs)?, source_event_id],
+            "INSERT OR REPLACE INTO graph_nodes(id, kind, label, attrs_json, source_event_id, visibility)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id,
+                kind,
+                label,
+                canonical_json(&attrs)?,
+                source_event_id,
+                visibility.as_str(),
+            ],
         )?;
         Ok(())
     }
@@ -1152,19 +1727,107 @@ impl Meshlet {
         kind: &str,
         attrs: Value,
         source_event_id: &str,
+        visibility: EventVisibility,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO graph_edges(id, from_id, to_id, kind, attrs_json, source_event_id)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO graph_edges(id, from_id, to_id, kind, attrs_json, source_event_id, visibility)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 id,
                 from_id,
                 to_id,
                 kind,
                 canonical_json(&attrs)?,
-                source_event_id
+                source_event_id,
+                visibility.as_str(),
             ],
         )?;
+        Ok(())
+    }
+
+    fn backfill_contexts_from_events(&self) -> Result<()> {
+        for event in self.events_ascending()? {
+            if event.event_type == "context.added" {
+                self.apply_context_added(&event)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn backfill_read_model_visibility(&self) -> Result<()> {
+        let event_visibility = self.event_visibility_by_id()?;
+        self.backfill_graph_visibility("graph_nodes", "id", &event_visibility)?;
+        self.backfill_graph_visibility("graph_edges", "id", &event_visibility)?;
+        self.backfill_skill_visibility(&event_visibility)?;
+        Ok(())
+    }
+
+    fn event_visibility_by_id(&self) -> Result<BTreeMap<String, String>> {
+        let mut stmt = self.conn.prepare("SELECT id, visibility FROM events")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, visibility)| {
+                strict_visibility(&visibility).map(|visibility| (id, visibility.to_string()))
+            })
+            .collect())
+    }
+
+    fn backfill_graph_visibility(
+        &self,
+        table: &str,
+        id_column: &str,
+        event_visibility: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {id_column}, source_event_id, attrs_json FROM {table}"
+        ))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, source_event_id, attrs_json) in rows {
+            let visibility = event_visibility
+                .get(&source_event_id)
+                .map(String::as_str)
+                .or_else(|| attrs_visibility(&attrs_json))
+                .unwrap_or("private");
+            self.conn.execute(
+                &format!("UPDATE {table} SET visibility = ?1 WHERE {id_column} = ?2"),
+                params![visibility, id],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn backfill_skill_visibility(&self, event_visibility: &BTreeMap<String, String>) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, source_event_id FROM skills")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (name, source_event_id) in rows {
+            let visibility = event_visibility
+                .get(&source_event_id)
+                .map(String::as_str)
+                .unwrap_or("private");
+            self.conn.execute(
+                "UPDATE skills SET visibility = ?1 WHERE name = ?2",
+                params![visibility, name],
+            )?;
+        }
         Ok(())
     }
 }
@@ -1190,12 +1853,37 @@ pub fn parse_json_arg(input: &str) -> Result<Value> {
     Ok(value)
 }
 
+pub fn parse_visibility_arg(input: &str) -> Result<EventVisibility> {
+    EventVisibility::from_str(input)
+}
+
+pub fn parse_output_mode_arg(input: &str) -> Result<OutputMode> {
+    OutputMode::from_str(input)
+}
+
+pub fn parse_safety_profile_arg(input: &str) -> Result<SafetyProfile> {
+    SafetyProfile::from_str(input)
+}
+
 fn validate_event_type(event_type: &str) -> Result<()> {
     if EVENT_TYPES.contains(&event_type) {
         Ok(())
     } else {
         bail!("unsupported event type: {event_type}")
     }
+}
+
+fn validate_payload_safety(value: &Value, profile: SafetyProfile) -> Result<()> {
+    let report = scan_payload_safety(value);
+    if let Some(path) = report.blocked_keys.first() {
+        bail!("event payload contains prohibited secret key: {path}");
+    }
+    if profile == SafetyProfile::PublicSafe {
+        if let Some(path) = report.suspicious_values.first() {
+            bail!("event payload contains suspicious secret-looking value at: {path}");
+        }
+    }
+    Ok(())
 }
 
 fn validate_skill_manifest(manifest: &SkillManifest) -> Result<()> {
@@ -1269,36 +1957,38 @@ fn validate_event_payload(event_type: &str, payload: &Value) -> Result<()> {
     Ok(())
 }
 
-fn validate_no_secret_keys(value: &Value) -> Result<()> {
-    if let Some(path) = find_secret_key(value, "payload") {
-        bail!("event payload contains prohibited secret key: {path}");
-    }
-    Ok(())
+fn scan_payload_safety(value: &Value) -> RedactionReport {
+    let mut report = RedactionReport::default();
+    scan_payload_safety_at(value, "payload", &mut report);
+    report
 }
 
-fn find_secret_key(value: &Value, path: &str) -> Option<String> {
+fn scan_payload_safety_at(value: &Value, path: &str, report: &mut RedactionReport) {
     match value {
         Value::Object(map) => {
             for (key, child) in map {
                 let child_path = format!("{path}.{key}");
                 if SECRET_KEY_DENYLIST.contains(&normalize_key(key).as_str()) {
-                    return Some(child_path);
+                    report.blocked_keys.push(child_path.clone());
                 }
-                if let Some(found) = find_secret_key(child, &child_path) {
-                    return Some(found);
-                }
+                scan_payload_safety_at(child, &child_path, report);
             }
-            None
         }
         Value::Array(items) => {
             for item in items {
-                if let Some(found) = find_secret_key(item, &format!("{path}[]")) {
-                    return Some(found);
-                }
+                scan_payload_safety_at(item, &format!("{path}[]"), report);
             }
-            None
         }
-        _ => None,
+        Value::String(value) => {
+            let lowered = value.to_lowercase();
+            if SECRET_VALUE_MARKERS
+                .iter()
+                .any(|marker| lowered.contains(&marker.to_lowercase()))
+            {
+                report.suspicious_values.push(path.to_string());
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1335,6 +2025,156 @@ fn merge_task_payload(task: &mut serde_json::Map<String, Value>, event: &Event) 
     }
     task.insert("updated_event_id".to_string(), json!(event.id));
     task.insert("updated_at".to_string(), json!(event.created_at));
+}
+
+fn attrs_with_visibility(attrs: Value, visibility: EventVisibility) -> Value {
+    match attrs {
+        Value::Object(mut map) => {
+            map.insert("visibility".to_string(), json!(visibility.as_str()));
+            Value::Object(map)
+        }
+        other => json!({
+            "value": other,
+            "visibility": visibility.as_str(),
+        }),
+    }
+}
+
+fn visibility_clause(profile: SafetyProfile) -> &'static str {
+    match profile {
+        SafetyProfile::PublicSafe => "visibility = 'public'",
+        SafetyProfile::LocalTrusted => "visibility IN ('private', 'local', 'public')",
+    }
+}
+
+fn attrs_visibility(attrs_json: &str) -> Option<&'static str> {
+    serde_json::from_str::<Value>(attrs_json)
+        .ok()
+        .and_then(|attrs| {
+            attrs
+                .get("visibility")
+                .and_then(Value::as_str)
+                .and_then(strict_visibility)
+        })
+}
+
+fn strict_visibility(value: &str) -> Option<&'static str> {
+    match value {
+        "private" => Some("private"),
+        "local" => Some("local"),
+        "public" => Some("public"),
+        _ => None,
+    }
+}
+
+fn compact_event(event: &Event) -> Value {
+    let label = event
+        .payload
+        .get("label")
+        .or_else(|| event.payload.get("title"))
+        .or_else(|| event.payload.get("status"))
+        .cloned();
+    json!({
+        "id": event.id,
+        "type": event.event_type,
+        "created_at": event.created_at,
+        "actor": event.actor,
+        "visibility": event.visibility.as_str(),
+        "label": label,
+        "hash": event.hash,
+    })
+}
+
+fn compact_node(node: Value) -> Value {
+    json!({
+        "id": node.get("id").cloned().unwrap_or(Value::Null),
+        "kind": node.get("kind").cloned().unwrap_or(Value::Null),
+        "label": node.get("label").cloned().unwrap_or(Value::Null),
+        "visibility": node
+            .get("visibility")
+            .or_else(|| node.get("attrs")
+            .and_then(|attrs| attrs.get("visibility"))
+            )
+            .cloned()
+            .unwrap_or_else(|| json!("private")),
+        "source_event_id": node.get("source_event_id").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn compact_edge(edge: Value) -> Value {
+    json!({
+        "id": edge.get("id").cloned().unwrap_or(Value::Null),
+        "from_id": edge.get("from_id").cloned().unwrap_or(Value::Null),
+        "to_id": edge.get("to_id").cloned().unwrap_or(Value::Null),
+        "kind": edge.get("kind").cloned().unwrap_or(Value::Null),
+        "visibility": edge
+            .get("visibility")
+            .or_else(|| edge.get("attrs")
+            .and_then(|attrs| attrs.get("visibility"))
+            )
+            .cloned()
+            .unwrap_or_else(|| json!("private")),
+        "source_event_id": edge.get("source_event_id").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn compact_query(mut value: Value, profile: SafetyProfile) -> Value {
+    for key in ["events", "nodes", "edges"] {
+        let Some(section) = value.get_mut(key).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let Some(items) = section.get_mut("items").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let compacted = items
+            .drain(..)
+            .filter_map(|item| match key {
+                "events" => serde_json::from_value::<Event>(item)
+                    .ok()
+                    .and_then(|event| {
+                        if profile != SafetyProfile::PublicSafe
+                            || event.visibility == EventVisibility::Public
+                        {
+                            Some(compact_event(&event))
+                        } else {
+                            None
+                        }
+                    }),
+                "nodes" => {
+                    if profile != SafetyProfile::PublicSafe || value_is_public(&item) {
+                        Some(compact_node(item))
+                    } else {
+                        None
+                    }
+                }
+                "edges" => {
+                    if profile != SafetyProfile::PublicSafe || value_is_public(&item) {
+                        Some(compact_edge(item))
+                    } else {
+                        None
+                    }
+                }
+                _ => Some(item),
+            })
+            .collect::<Vec<_>>();
+        *items = compacted;
+    }
+    value
+}
+
+fn filter_public_values(values: Vec<Value>, profile: SafetyProfile) -> Vec<Value> {
+    if profile != SafetyProfile::PublicSafe {
+        return values;
+    }
+    values.into_iter().filter(value_is_public).collect()
+}
+
+fn value_is_public(value: &Value) -> bool {
+    value
+        .get("visibility")
+        .or_else(|| value.get("attrs").and_then(|attrs| attrs.get("visibility")))
+        .and_then(Value::as_str)
+        == Some("public")
 }
 
 fn imported_node_id(namespace: &str, external_id: &str) -> String {
@@ -1402,8 +2242,9 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         created_at: row.get(2)?,
         actor: row.get(3)?,
         payload,
-        hash: row.get(5)?,
-        prev_hash: row.get(6)?,
+        visibility: EventVisibility::from_db(row.get::<_, Option<String>>(5)?.as_deref()),
+        hash: row.get(6)?,
+        prev_hash: row.get(7)?,
     })
 }
 
@@ -1425,8 +2266,9 @@ fn event_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRecor
             created_at: row.get(3)?,
             actor: row.get(4)?,
             payload,
-            hash: row.get(6)?,
-            prev_hash: row.get(7)?,
+            visibility: EventVisibility::from_db(row.get::<_, Option<String>>(6)?.as_deref()),
+            hash: row.get(7)?,
+            prev_hash: row.get(8)?,
         },
     })
 }
@@ -1439,6 +2281,7 @@ fn node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "label": row.get::<_, Option<String>>(2)?,
         "attrs": serde_json::from_str::<Value>(&attrs_json).unwrap_or_else(|_| json!({})),
         "source_event_id": row.get::<_, String>(4)?,
+        "visibility": row.get::<_, String>(5)?,
     }))
 }
 
@@ -1451,6 +2294,41 @@ fn edge_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "kind": row.get::<_, String>(3)?,
         "attrs": serde_json::from_str::<Value>(&attrs_json).unwrap_or_else(|_| json!({})),
         "source_event_id": row.get::<_, String>(5)?,
+        "visibility": row.get::<_, String>(6)?,
+    }))
+}
+
+fn skill_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let permissions: String = row.get(4)?;
+    Ok(json!({
+        "name": row.get::<_, String>(0)?,
+        "version": row.get::<_, String>(1)?,
+        "manifest_path": row.get::<_, String>(2)?,
+        "entry": row.get::<_, String>(3)?,
+        "permissions": serde_json::from_str::<Value>(&permissions).unwrap_or_else(|_| json!([])),
+        "description": row.get::<_, Option<String>>(5)?,
+        "source_event_id": row.get::<_, String>(6)?,
+        "visibility": row.get::<_, String>(7)?,
+    }))
+}
+
+fn context_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let attrs_json: Option<String> = row.get(10)?;
+    Ok(json!({
+        "id": row.get::<_, String>(0)?,
+        "kind": row.get::<_, String>(1)?,
+        "namespace": row.get::<_, Option<String>>(2)?,
+        "title": row.get::<_, Option<String>>(3)?,
+        "summary": row.get::<_, String>(4)?,
+        "visibility": row.get::<_, String>(5)?,
+        "source_event_id": row.get::<_, String>(6)?,
+        "created_at": row.get::<_, String>(7)?,
+        "updated_at": row.get::<_, String>(8)?,
+        "schema_version": row.get::<_, i64>(9)?,
+        "attrs": attrs_json
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .unwrap_or_else(|| json!({})),
     }))
 }
 
@@ -1474,6 +2352,18 @@ mod tests {
         response["result"]["contents"][0]["text"]
             .as_str()
             .expect("MCP resource text")
+    }
+
+    fn skill_payload(name: &str) -> Value {
+        json!({
+            "name": name,
+            "version": "0.1.0",
+            "kind": "skill",
+            "manifest_path": format!("{name}.toml"),
+            "entry": "./SKILL.md",
+            "permissions": ["read_repo"],
+            "description": format!("{name} skill"),
+        })
     }
 
     #[test]
@@ -1529,6 +2419,615 @@ mod tests {
         )?;
 
         assert_eq!(meshlet.event_count()?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_append_rejects_secret_looking_values() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        let result = meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "bad", "note": "Bearer abc123"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(meshlet.event_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_query_returns_compact_public_items_only() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "private needle", "note": "hidden"}),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "public needle", "note": "visible"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let result = meshlet.query_scoped_view(
+            "needle",
+            Some("events"),
+            None,
+            20,
+            OutputMode::Compact,
+            SafetyProfile::PublicSafe,
+        )?;
+        let items = result["events"]["items"].as_array().expect("items");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["visibility"], "public");
+        assert!(items[0].get("payload").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn context_added_materializes_into_contexts() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let event = meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({
+                "kind": "decision",
+                "namespace": "repo:meshlet",
+                "title": "Use contexts",
+                "summary": "Contexts are a read model",
+                "label": "ignored fallback"
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let contexts = meshlet.list_contexts_limited(10, SafetyProfile::LocalTrusted)?;
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0]["id"], format!("context:{}", event.id));
+        assert_eq!(contexts[0]["kind"], "decision");
+        assert_eq!(contexts[0]["namespace"], "repo:meshlet");
+        assert_eq!(contexts[0]["title"], "Use contexts");
+        assert_eq!(contexts[0]["summary"], "Contexts are a read model");
+        assert_eq!(contexts[0]["visibility"], "public");
+        assert_eq!(contexts[0]["source_event_id"], event.id);
+        assert_eq!(contexts[0]["created_at"], event.created_at);
+        assert_eq!(contexts[0]["updated_at"], event.created_at);
+        assert_eq!(contexts[0]["schema_version"], CONTEXT_SCHEMA_VERSION);
+        assert_eq!(contexts[0]["attrs"]["label"], "ignored fallback");
+        Ok(())
+    }
+
+    #[test]
+    fn contexts_rebuild_is_deterministic() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "context.added",
+            "agent:test",
+            json!({"label": "first", "namespace": "repo"}),
+        )?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"summary": "second"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        let before = meshlet.list_contexts_limited(20, SafetyProfile::LocalTrusted)?;
+
+        meshlet.conn.execute("DELETE FROM contexts", [])?;
+        meshlet.rebuild_graph()?;
+
+        assert_eq!(
+            before,
+            meshlet.list_contexts_limited(20, SafetyProfile::LocalTrusted)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_context_search_filters_visibility_before_limit() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "needle public"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        for index in 0..12 {
+            let visibility = if index % 2 == 0 {
+                EventVisibility::Private
+            } else {
+                EventVisibility::Local
+            };
+            meshlet.append_event_with_options(
+                "context.added",
+                "agent:test",
+                json!({"label": format!("needle hidden {index}")}),
+                visibility,
+                SafetyProfile::LocalTrusted,
+            )?;
+        }
+
+        let result = meshlet.search_contexts("needle", 1, SafetyProfile::PublicSafe)?;
+        let items = result["contexts"]["items"].as_array().expect("contexts");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["summary"], "needle public");
+        assert_eq!(items[0]["visibility"], "public");
+        Ok(())
+    }
+
+    #[test]
+    fn migration_from_v2_creates_and_backfills_contexts() -> Result<()> {
+        let dir = tempdir()?;
+        let db_dir = dir.path().join(DB_DIR);
+        fs::create_dir_all(&db_dir)?;
+        let db_path = db_dir.join(DB_FILE);
+        let conn = Connection::open(&db_path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                id TEXT PRIMARY KEY,
+                seq INTEGER NOT NULL UNIQUE,
+                type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private',
+                hash TEXT NOT NULL UNIQUE,
+                prev_hash TEXT
+            );
+            CREATE TABLE graph_nodes (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                label TEXT,
+                attrs_json TEXT NOT NULL,
+                source_event_id TEXT NOT NULL
+            );
+            CREATE TABLE graph_edges (
+                id TEXT PRIMARY KEY,
+                from_id TEXT NOT NULL,
+                to_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                attrs_json TEXT NOT NULL,
+                source_event_id TEXT NOT NULL
+            );
+            CREATE TABLE skills (
+                name TEXT PRIMARY KEY,
+                version TEXT NOT NULL,
+                manifest_path TEXT NOT NULL,
+                entry TEXT NOT NULL,
+                permissions_json TEXT NOT NULL,
+                description TEXT,
+                source_event_id TEXT NOT NULL
+            );
+            INSERT INTO meta(key, value) VALUES('schema_version', '2');
+            "#,
+        )?;
+        let payload = json!({"label": "v2 context", "namespace": "legacy"});
+        let created_at = "2026-06-28T00:00:00.000Z";
+        let hash = event_hash(
+            "v2-context",
+            "context.added",
+            created_at,
+            "agent:test",
+            &payload,
+            None,
+        )?;
+        conn.execute(
+            "INSERT INTO events(id, seq, type, created_at, actor, payload_json, visibility, hash, prev_hash)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                "v2-context",
+                1_i64,
+                "context.added",
+                created_at,
+                "agent:test",
+                canonical_json(&payload)?,
+                "public",
+                hash,
+                Option::<String>::None,
+            ],
+        )?;
+        drop(conn);
+
+        let meshlet = Meshlet::open(dir.path())?;
+        let contexts = meshlet.list_contexts_limited(10, SafetyProfile::PublicSafe)?;
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0]["id"], "context:v2-context");
+        assert_eq!(contexts[0]["summary"], "v2 context");
+        assert_eq!(contexts[0]["namespace"], "legacy");
+        assert_eq!(contexts[0]["visibility"], "public");
+        Ok(())
+    }
+
+    #[test]
+    fn graph_nodes_visibility_column_materializes_from_event_visibility() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "public context"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let nodes = meshlet.graph_nodes(Some("context"))?;
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0]["visibility"], "public");
+        assert_eq!(nodes[0]["attrs"]["visibility"], "public");
+        Ok(())
+    }
+
+    #[test]
+    fn graph_edges_visibility_column_materializes_from_event_visibility() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "links": [{"source": "a", "target": "b", "relation": "uses"}]
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let edges = meshlet.graph_edges_limited(Some("graphify:repo:a"), 20)?;
+
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["visibility"], "public");
+        assert_eq!(edges[0]["attrs"]["visibility"], "public");
+        Ok(())
+    }
+
+    #[test]
+    fn skills_visibility_column_materializes_from_event_visibility() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "skill.added",
+            "agent:test",
+            skill_payload("public-skill"),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let skill = meshlet.show_skill("public-skill")?;
+
+        assert_eq!(skill["visibility"], "public");
+        assert_eq!(skill["source_event_id"].as_str().expect("source").len(), 36);
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_graph_query_filters_visibility_before_limit() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        for index in 0..12 {
+            let visibility = if index % 2 == 0 {
+                EventVisibility::Private
+            } else {
+                EventVisibility::Local
+            };
+            meshlet.append_event_with_options(
+                "graph.imported",
+                "agent:test",
+                json!({
+                    "source": "graphify",
+                    "namespace": "graphify:repo",
+                    "nodes": [{"id": format!("a-hidden-{index}"), "label": "needle hidden"}],
+                    "links": []
+                }),
+                visibility,
+                SafetyProfile::LocalTrusted,
+            )?;
+        }
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "z-public", "label": "needle public"}],
+                "links": []
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let result = meshlet.query_scoped_view(
+            "needle",
+            Some("nodes"),
+            Some("graphify:repo"),
+            1,
+            OutputMode::Compact,
+            SafetyProfile::PublicSafe,
+        )?;
+        let items = result["nodes"]["items"].as_array().expect("nodes");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "graphify:repo:z-public");
+        assert_eq!(items[0]["visibility"], "public");
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_skill_list_filters_visibility_before_limit() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        for index in 0..12 {
+            let visibility = if index % 2 == 0 {
+                EventVisibility::Private
+            } else {
+                EventVisibility::Local
+            };
+            meshlet.append_event_with_options(
+                "skill.added",
+                "agent:test",
+                skill_payload(&format!("aaa-hidden-{index}")),
+                visibility,
+                SafetyProfile::LocalTrusted,
+            )?;
+        }
+        meshlet.append_event_with_options(
+            "skill.added",
+            "agent:test",
+            skill_payload("zzz-public"),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let skills = meshlet.list_skills_limited(1, SafetyProfile::PublicSafe)?;
+
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0]["name"], "zzz-public");
+        assert_eq!(skills[0]["visibility"], "public");
+        Ok(())
+    }
+
+    #[test]
+    fn rebuild_read_models_preserves_visibility_columns() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "skill.added",
+            "agent:test",
+            skill_payload("local-skill"),
+            EventVisibility::Local,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "links": [{"source": "a", "target": "b", "relation": "uses"}]
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        let before_nodes = meshlet.graph_nodes_limited(None, 20)?;
+        let before_edges = meshlet.graph_edges_limited(None, 20)?;
+        let before_skills = meshlet.list_skills()?;
+
+        meshlet.conn.execute("DELETE FROM graph_nodes", [])?;
+        meshlet.conn.execute("DELETE FROM graph_edges", [])?;
+        meshlet.conn.execute("DELETE FROM skills", [])?;
+        meshlet.rebuild_graph()?;
+
+        assert_eq!(before_nodes, meshlet.graph_nodes_limited(None, 20)?);
+        assert_eq!(before_edges, meshlet.graph_edges_limited(None, 20)?);
+        assert_eq!(before_skills, meshlet.list_skills()?);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_from_v3_adds_visibility_columns_and_backfills_safely() -> Result<()> {
+        let dir = tempdir()?;
+        let db_dir = dir.path().join(DB_DIR);
+        fs::create_dir_all(&db_dir)?;
+        let conn = Connection::open(db_dir.join(DB_FILE))?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                id TEXT PRIMARY KEY,
+                seq INTEGER NOT NULL UNIQUE,
+                type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private',
+                hash TEXT NOT NULL UNIQUE,
+                prev_hash TEXT
+            );
+            CREATE TABLE graph_nodes (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                label TEXT,
+                attrs_json TEXT NOT NULL,
+                source_event_id TEXT NOT NULL
+            );
+            CREATE TABLE graph_edges (
+                id TEXT PRIMARY KEY,
+                from_id TEXT NOT NULL,
+                to_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                attrs_json TEXT NOT NULL,
+                source_event_id TEXT NOT NULL
+            );
+            CREATE TABLE skills (
+                name TEXT PRIMARY KEY,
+                version TEXT NOT NULL,
+                manifest_path TEXT NOT NULL,
+                entry TEXT NOT NULL,
+                permissions_json TEXT NOT NULL,
+                description TEXT,
+                source_event_id TEXT NOT NULL
+            );
+            CREATE TABLE contexts (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                namespace TEXT,
+                title TEXT,
+                summary TEXT NOT NULL,
+                visibility TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                attrs_json TEXT
+            );
+            INSERT INTO meta(key, value) VALUES('schema_version', '3');
+            INSERT INTO events(id, seq, type, created_at, actor, payload_json, visibility, hash, prev_hash)
+                VALUES('public-event', 1, 'context.added', '2026-06-28T00:00:00.000Z', 'agent:test', '{}', 'public', 'hash-public', NULL);
+            INSERT INTO events(id, seq, type, created_at, actor, payload_json, visibility, hash, prev_hash)
+                VALUES('private-event', 2, 'context.added', '2026-06-28T00:00:01.000Z', 'agent:test', '{}', 'private', 'hash-private', 'hash-public');
+            INSERT INTO graph_nodes(id, kind, label, attrs_json, source_event_id)
+                VALUES('node-from-event', 'context', 'event', '{"visibility":"private"}', 'public-event');
+            INSERT INTO graph_nodes(id, kind, label, attrs_json, source_event_id)
+                VALUES('node-from-attrs', 'context', 'attrs', '{"visibility":"public"}', 'missing-event');
+            INSERT INTO graph_nodes(id, kind, label, attrs_json, source_event_id)
+                VALUES('node-weird', 'context', 'weird', '{"visibility":"PUBLIC"}', 'missing-event');
+            INSERT INTO graph_edges(id, from_id, to_id, kind, attrs_json, source_event_id)
+                VALUES('edge-from-event', 'a', 'b', 'uses', '{"visibility":"public"}', 'private-event');
+            INSERT INTO graph_edges(id, from_id, to_id, kind, attrs_json, source_event_id)
+                VALUES('edge-from-attrs', 'a', 'c', 'uses', '{"visibility":"local"}', 'missing-event');
+            INSERT INTO skills(name, version, manifest_path, entry, permissions_json, description, source_event_id)
+                VALUES('public-skill', '0.1.0', 'public.toml', './SKILL.md', '[]', NULL, 'public-event');
+            INSERT INTO skills(name, version, manifest_path, entry, permissions_json, description, source_event_id)
+                VALUES('missing-skill', '0.1.0', 'missing.toml', './SKILL.md', '[]', NULL, 'missing-event');
+            "#,
+        )?;
+        drop(conn);
+
+        let meshlet = Meshlet::open(dir.path())?;
+        let nodes = meshlet.graph_nodes_limited(None, 20)?;
+        let edges = meshlet.graph_edges_limited(None, 20)?;
+        let public_skill = meshlet.show_skill("public-skill")?;
+        let missing_skill = meshlet.show_skill("missing-skill")?;
+
+        assert_eq!(
+            nodes
+                .iter()
+                .find(|node| node["id"] == "node-from-event")
+                .expect("event node")["visibility"],
+            "public"
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .find(|node| node["id"] == "node-from-attrs")
+                .expect("attrs node")["visibility"],
+            "public"
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .find(|node| node["id"] == "node-weird")
+                .expect("weird node")["visibility"],
+            "private"
+        );
+        assert_eq!(
+            edges
+                .iter()
+                .find(|edge| edge["id"] == "edge-from-event")
+                .expect("event edge")["visibility"],
+            "private"
+        );
+        assert_eq!(
+            edges
+                .iter()
+                .find(|edge| edge["id"] == "edge-from-attrs")
+                .expect("attrs edge")["visibility"],
+            "local"
+        );
+        assert_eq!(public_skill["visibility"], "public");
+        assert_eq!(missing_skill["visibility"], "private");
+        Ok(())
+    }
+
+    #[test]
+    fn public_doctor_reports_stored_secret_like_values() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "local", "note": "Bearer abc123"}),
+            EventVisibility::Local,
+            SafetyProfile::LocalTrusted,
+        )?;
+
+        let report = meshlet.public_doctor()?;
+
+        assert_eq!(report["ok"], false);
+        assert!(
+            !report["redaction_report"]["suspicious_values"]
+                .as_array()
+                .expect("suspicious")
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_export_contains_only_public_compact_state() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "private note"}),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "public note"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let export = meshlet.public_export(20)?;
+        let events = export["events"].as_array().expect("events");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["visibility"], "public");
+        assert!(events[0].get("payload").is_none());
         Ok(())
     }
 
@@ -2352,6 +3851,51 @@ description = "Review Rust code through resources."
             }),
         );
         assert_eq!(invalid["error"]["code"], -32602);
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_public_safe_rejects_mutation_and_full_output() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let publish = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meshlet_publish_event",
+                "arguments": {
+                    "type": "context.added",
+                    "visibility": "public",
+                    "payload": { "label": "public" }
+                }
+            }
+        });
+        let full_query = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "meshlet_query",
+                "arguments": { "q": "repo", "mode": "full" }
+            }
+        });
+
+        let publish_response = handle_mcp_request_with_profile(
+            &meshlet,
+            &publish,
+            json!(1),
+            SafetyProfile::PublicSafe,
+        );
+        let query_response = handle_mcp_request_with_profile(
+            &meshlet,
+            &full_query,
+            json!(2),
+            SafetyProfile::PublicSafe,
+        );
+
+        assert_eq!(publish_response["error"]["code"], -32602);
+        assert_eq!(query_response["error"]["code"], -32602);
         Ok(())
     }
 

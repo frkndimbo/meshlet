@@ -4,6 +4,16 @@
 
 The event log is the source of truth. The context graph is a materialized view and must be rebuildable from events.
 
+## Read Models
+
+- `contexts` is a materialized read model built from `context.added` events.
+- Context rows are query surfaces, not source of truth.
+- Context rebuild must replay events deterministically and keep visibility from the source event.
+- Graph nodes, graph edges, and skills must keep visibility in SQL columns for read/query filtering.
+- `attrs_json` visibility is compatibility metadata only, not the primary security or query surface.
+- Public-safe read model queries must filter visibility in SQL before `LIMIT`.
+- `agent.message` to context materialization is pending until its compact schema is explicit.
+
 ## Node and Edge Rules
 
 Current node kinds:
@@ -36,6 +46,8 @@ New node or edge kinds require a matching update to this file and tests for rebu
 - Graph imports are materialized views and must rebuild from the event log.
 - Imported node IDs use `<namespace>:<external_id>`.
 - Imported graph attrs must include `namespace`, `source`, and `external_id` for nodes.
+- Graph nodes and edges materialized from events inherit the source event visibility in SQL columns.
+- Public-safe graph reads and exports must include only graph data whose SQL visibility is `public`.
 - Unknown imported relations materialize as `references` edges while preserving the original `relation` attr.
 
 ## Graphify Policy
