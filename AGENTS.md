@@ -28,6 +28,7 @@
 - Use graph-first navigation for architecture questions when `graphify-out/graph.json` exists.
 - Search before reading; read narrow files or line ranges and avoid full `graph.json` unless needed.
 - Use `rtk git diff --stat` before detailed diffs; inspect full diffs only for changed or high-risk files.
+- Remove transient/generated scratch files with `rtk` cleanup commands instead of `apply_patch` to avoid noisy deleted-file diffs.
 - Keep patches small and scoped. Avoid broad rewrites unless explicitly required.
 - Report successful verification tersely; include full logs only for failures or ambiguous results.
 - Load only the minimal relevant skills for the task.
