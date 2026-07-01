@@ -7,18 +7,19 @@
 
 ## Product Scope
 - Meshlet is a Rust-core local context mesh for agent workflows.
-- v0.1 scope: event log, context graph, skill registry, MCP stdio, CLI.
+- v0.4 scope: event log, context graph, skill registry, MCP stdio, CLI, public-safe local runtime, and agent mailbox.
 - Do not add cloud sync, dashboard, marketplace, A2A, auth, vector DB, or AI summarizer without an explicit phase change.
 
 ## Architecture Rules
 - Event log is the source of truth.
 - Context graph is a rebuildable materialized view from events.
-- SQLite is the v0.1 storage backend.
+- SQLite is the local storage backend.
 - MCP tools must be small, typed, and return structured JSON-RPC errors.
 - Skills must use explicit manifests and declared permissions.
 
 ## Optimization
-- Use Ponytail as an additive simplicity check when available.
+- Use Ponytail only during coding sessions: code/config implementation, refactor, fix, review, or technical design.
+- Do not invoke Ponytail for product analysis, relevance checks, general Q&A, translation, or non-coding research.
 - Prefer YAGNI, existing repo patterns, stdlib, and minimal correct code.
 - Do not use Ponytail to cut security checks, validation, tests, error handling, accessibility, or documented phase rules.
 - If Ponytail advice conflicts with Meshlet scope, security, or architecture rules, keep the Meshlet rule.

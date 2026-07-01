@@ -203,15 +203,23 @@ Later optional: `redb` untuk embedded KV cepat jika perlu.
 - evidence references
 - better permission manifest
 
-### v0.3 - Agent Mailbox
+### v0.3 - Public-Safe Local Runtime
 
-- inbox/outbox
-- task assignment
+- event visibility: private/local/public
+- compact query and digest output
+- public-safe MCP stdio profile
+- stored-state doctor before sharing
+- sanitized public export
+
+### v0.4 - Agent Mailbox
+
+- inbox/outbox via local `agent.message` events
+- task assignment through typed task payloads
 - task state machine
 - agent messages
 - replay timeline
 
-### v0.4 - Cloud Sync
+### v0.5 - Cloud Sync
 
 - encrypted event sync
 - device identity

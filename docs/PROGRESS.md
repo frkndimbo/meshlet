@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-v0.3 - Public-Safe Local Runtime.
+v0.4 - Agent Mailbox.
 
 ## Current State
 
@@ -11,33 +11,51 @@ v0.3 - Public-Safe Local Runtime.
 - Events include `repo.initialized`, `skill.added`, `context.added`, `agent.message`, `evidence.attached`, `task.created`, `task.updated`, and `graph.imported`.
 - Event hash chains can be verified with `meshlet verify`.
 - Contexts are materialized from `context.added` events into the `contexts` read model.
+- Tasks are materialized from `task.created` and `task.updated` events into the `tasks` read model.
+- Agent messages are materialized from `agent.message` events into the `mailbox_messages` read model.
 - Graph nodes and edges are materialized from events and can be rebuilt.
 - Graphify `graph.json` can be imported through CLI as a namespaced graph.
 - Graph namespaces can be listed through CLI and MCP.
 - Deterministic local query is available through CLI and MCP as `meshlet_query`.
+- FTS5 is the primary text search path for compact events, contexts, graph nodes, graph edges, and skills.
 - Query supports optional graph namespace filtering for nodes and edges.
 - Event, graph, and context outputs use bounded limits for large local state.
-- Context list/search helpers apply visibility filtering in SQL before `LIMIT`.
-- Graph nodes, graph edges, and skills have SQL `visibility` columns for public-safe read paths before FTS5.
+- FTS-backed public-safe searches join to base read-model tables and apply SQL visibility filtering before `LIMIT`.
+- Raw `payload_json` and `attrs_json` scans are not core retrieval paths; event search indexes compact safe fields only.
+- Graph nodes, graph edges, and skills have SQL `visibility` columns for public-safe read paths.
 - Graph and skill scoped helpers apply visibility filtering in SQL before `LIMIT`.
 - Skill manifests can be registered from TOML with permission allowlist and entry path hygiene.
-- Task and evidence views are available through CLI and MCP.
+- Task, mailbox, timeline, and evidence views are available through CLI and MCP.
+- Task status transitions are constrained to `open`, `in_progress`, `blocked`, `done`, and `canceled`.
+- Public-safe task reads replay only public task events, so private/local task metadata is not exposed by digest, task tools, or task resources.
 - Evidence can support tasks through graph edges.
 - Evidence attach can compute SHA-256 digests, and evidence verify can compare stored digest with current file contents.
 - Events have `private`, `local`, or `public` visibility.
 - Public-safe query/digest/export paths use compact output and filter private/local state.
 - Full public export rewrite through dedicated public-safe views/queries remains deferred.
+- Blob/CCR metadata and retrieve-by-hash flow remain deferred.
 - `meshlet doctor public` checks event-chain integrity and stored secret-like data before sharing.
-- `meshlet export public` writes a compact sanitized public bundle.
+- `meshlet export public` writes a compact sanitized public bundle with public events, tasks, mailbox message envelopes, timelines, and graph data.
+- `meshlet export public --format okf` writes a public-safe OKF markdown bundle with contexts, tasks, message envelopes, skills, evidence, event log, and compact task timelines.
+- `meshlet okf doctor` checks OKF concept frontmatter and local markdown links.
 - MCP stdio skeleton supports initialize, tools/list, tools/call, resources/list, and resources/read.
-- Tests cover init, hash chaining, chain verification, secret-key rejection, public-safe value rejection, visibility-filtered compact query, context materialization, deterministic context rebuild, v2-to-v3 context migration, graph/skill SQL visibility materialization and v3-to-v4 migration, public doctor, skill materialization and validation, deterministic query, graph imports, graph rebuild determinism, namespace filtering, task/evidence views, evidence digest verification, bounded context, and direct MCP behavior for initialize, tools, resources, valid tool calls, public-safe guards, and invalid tool params.
+- Tests cover init, hash chaining, chain verification, secret-key rejection, public-safe value rejection, visibility-filtered compact query, context materialization, deterministic context and FTS rebuilds, v2-to-v3 context migration, graph/skill SQL visibility materialization, v3-to-v4 migration, v4-to-v5 FTS migration, v5-to-v6 task/mailbox read-model creation, FTS-backed events/contexts/graph/skills search, public-safe FTS limit regression, public-safe task filtering, public doctor/export coverage, OKF message/timeline export, skill materialization and validation, deterministic query, graph imports, graph rebuild determinism, namespace filtering, task/evidence/mailbox/timeline views, evidence digest verification, bounded context, and direct MCP behavior for initialize, tools, resources, v0.4 task/mailbox/timeline tools, public-safe guards, and invalid tool params.
 - Agent docs and policy docs exist: AGENTS.md, README.md, docs/SCOPE.md, docs/MCP_POLICY.md, docs/SKILL_POLICY.md, docs/SECURITY_POLICY.md, docs/GRAPH_POLICY.md.
-- Graphify Codex integration is installed through AGENTS.md and .codex/hooks.json.
+- OKF policy docs exist in docs/OKF_POLICY.md.
+- Graphify Codex integration is installed through AGENTS.md, .codex/hooks.json, and .codex/skills/graphify.
 - Graphify code graph exists in graphify-out/ with GRAPH_REPORT.md, graph.json, and manifest.json. Semantic extraction was quota-blocked, so the current graph is code-focused.
 - Ponytail is installed and enabled in the local Codex plugin registry as a simplicity/over-engineering guard. Project rules keep it subordinate to Meshlet safety, scope, architecture, and verification gates.
+- Local tool baselines: Graphify CLI/skill 0.9.1, Ponytail plugin 4.8.4, RTK 0.43.0.
 
 ## Last Verified
 
+- 2026-07-02: `rtk cargo fmt --check`, `rtk cargo check`, `rtk cargo test`, and OKF export/doctor smoke passed after public export mailbox/timeline coverage. Test result: 69 passed.
+- 2026-07-02: Graphify refreshed after v0.4 public export stabilization. Result: 404 nodes, 1415 edges, 30 communities.
+- 2026-06-30: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after OKF public export and doctor implementation. Test result: 69 passed.
+- 2026-06-30: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after v0.4 Agent Mailbox implementation. Test result: 67 passed.
+- 2026-06-30: Ponytail plugin refreshed with `rtk proxy codex plugin add ponytail@ponytail --json`; installed path resolved to `/home/d0mb1/.codex/plugins/cache/ponytail/ponytail/4.8.4`.
+- 2026-06-29: Graphify updated from 0.8.45 to 0.9.1 with `rtk proxy uv tool upgrade graphifyy`; `graphify install --platform codex` and project-scoped Codex install refreshed the installed skills. Ponytail 4.8.3 and RTK 0.43.0 were already current against their upstream tags.
+- 2026-06-28: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after Patch 3 FTS5-first visibility-safe search implementation. Test result: 61 passed.
 - 2026-06-28: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after Patch 2 SQL visibility column implementation. Test result: 53 passed.
 - 2026-06-28: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after Patch 1 contexts read model implementation. Test result: 46 passed.
 - 2026-06-26: `rtk cargo test` passed after v0.3 public-safe runtime implementation. Test result: 42 passed.
@@ -56,9 +74,9 @@ v0.3 - Public-Safe Local Runtime.
 
 ## Next 3 Tasks
 
-1. Add FTS5-backed local search for contexts/events compact text; FTS5 is an architecture target, not a perf-only optional index.
-2. Design public-safe export views/queries after SQL visibility coverage is stable.
-3. Design the blob metadata table and retrieve-by-hash flow after read-model visibility stays stable.
+1. Decide whether OKF import should enter a later phase after export behavior stabilizes.
+2. Design the blob/CCR metadata table and retrieve-by-hash flow after mailbox read-model visibility stays stable.
+3. Prepare a v0.4 release smoke checklist after public export behavior remains stable.
 
 ## Maintenance Rules
 
