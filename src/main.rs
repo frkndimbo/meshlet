@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use meshlet::{DEFAULT_LIMIT, Meshlet, find_project_root, parse_json_arg, run_mcp_stdio};
+use meshlet::{
+    DEFAULT_LIMIT, Meshlet, OutputMode, find_project_root, parse_json_arg, parse_output_mode_arg,
+    parse_safety_profile_arg, parse_visibility_arg, run_mcp_stdio_with_profile,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -28,6 +31,10 @@ enum Command {
         namespace: Option<String>,
         #[arg(long, default_value_t = DEFAULT_LIMIT)]
         limit: u32,
+        #[arg(long, default_value = "compact")]
+        mode: String,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
     },
     Event {
         #[command(subcommand)]
@@ -45,13 +52,31 @@ enum Command {
         #[command(subcommand)]
         command: TaskCommand,
     },
+    Mailbox {
+        #[command(subcommand)]
+        command: MailboxCommand,
+    },
     Evidence {
         #[command(subcommand)]
         command: EvidenceCommand,
     },
+    Doctor {
+        #[command(subcommand)]
+        command: DoctorCommand,
+    },
+    Export {
+        #[command(subcommand)]
+        command: ExportCommand,
+    },
+    Okf {
+        #[command(subcommand)]
+        command: OkfCommand,
+    },
     Serve {
         #[arg(long)]
         mcp: Option<String>,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
     },
 }
 
@@ -64,14 +89,42 @@ enum EventCommand {
         actor: String,
         #[arg(long)]
         json: String,
+        #[arg(long, default_value = "private")]
+        visibility: String,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
     },
     List {
         #[arg(long, default_value_t = 20)]
         limit: u32,
+        #[arg(long, default_value = "full")]
+        mode: String,
     },
     Show {
         id: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum DoctorCommand {
+    Public,
+}
+
+#[derive(Debug, Subcommand)]
+enum ExportCommand {
+    Public {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = DEFAULT_LIMIT)]
+        limit: u32,
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OkfCommand {
+    Doctor { bundle_dir: PathBuf },
 }
 
 #[derive(Debug, Subcommand)]
@@ -108,12 +161,88 @@ enum SkillCommand {
 
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
+    Create {
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        assignee: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, default_value = "private")]
+        visibility: String,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
+    },
+    Update {
+        id: String,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        assignee: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, default_value = "private")]
+        visibility: String,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
+    },
     List {
         #[arg(long, default_value_t = DEFAULT_LIMIT)]
         limit: u32,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
     },
     Show {
         id: String,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
+    },
+    Timeline {
+        id: String,
+        #[arg(long, default_value_t = DEFAULT_LIMIT)]
+        limit: u32,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MailboxCommand {
+    Send {
+        #[arg(long = "from")]
+        from_agent: String,
+        #[arg(long = "to")]
+        to_agent: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        reply_to: Option<String>,
+        #[arg(long, default_value = "private")]
+        visibility: String,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
+    },
+    Inbox {
+        agent: String,
+        #[arg(long, default_value_t = DEFAULT_LIMIT)]
+        limit: u32,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
+    },
+    Outbox {
+        agent: String,
+        #[arg(long, default_value_t = DEFAULT_LIMIT)]
+        limit: u32,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
     },
 }
 
@@ -175,10 +304,19 @@ fn main() -> Result<()> {
             kind,
             namespace,
             limit,
+            mode,
+            profile,
         } => {
             let root = find_project_root()?;
             let meshlet = Meshlet::open(&root)?;
-            print_json(&meshlet.query_scoped(&q, Some(&kind), namespace.as_deref(), limit)?)?;
+            print_json(&meshlet.query_scoped_view(
+                &q,
+                Some(&kind),
+                namespace.as_deref(),
+                limit,
+                parse_output_mode_arg(&mode)?,
+                parse_safety_profile_arg(&profile)?,
+            )?)?;
         }
         Command::Event { command } => {
             let root = find_project_root()?;
@@ -188,12 +326,36 @@ fn main() -> Result<()> {
                     event_type,
                     actor,
                     json,
+                    visibility,
+                    profile,
                 } => {
                     let payload = parse_json_arg(&json)?;
-                    let event = meshlet.append_event(&event_type, &actor, payload)?;
+                    let event = meshlet.append_event_with_options(
+                        &event_type,
+                        &actor,
+                        payload,
+                        parse_visibility_arg(&visibility)?,
+                        parse_safety_profile_arg(&profile)?,
+                    )?;
                     print_json(&event)?;
                 }
-                EventCommand::List { limit } => print_json(&meshlet.list_events(limit)?)?,
+                EventCommand::List { limit, mode } => {
+                    let events = meshlet.list_events(limit)?;
+                    if parse_output_mode_arg(&mode)? == OutputMode::Compact {
+                        print_json(&serde_json::json!({
+                            "events": events.into_iter().map(|event| serde_json::json!({
+                                "id": event.id,
+                                "type": event.event_type,
+                                "created_at": event.created_at,
+                                "actor": event.actor,
+                                "visibility": event.visibility.as_str(),
+                                "hash": event.hash,
+                            })).collect::<Vec<_>>()
+                        }))?
+                    } else {
+                        print_json(&events)?
+                    }
+                }
                 EventCommand::Show { id } => print_json(&meshlet.show_event(&id)?)?,
             }
         }
@@ -235,8 +397,92 @@ fn main() -> Result<()> {
             let root = find_project_root()?;
             let meshlet = Meshlet::open(&root)?;
             match command {
-                TaskCommand::List { limit } => print_json(&meshlet.list_tasks(limit)?)?,
-                TaskCommand::Show { id } => print_json(&meshlet.show_task(&id)?)?,
+                TaskCommand::Create {
+                    task_id,
+                    title,
+                    status,
+                    assignee,
+                    note,
+                    visibility,
+                    profile,
+                } => print_json(&meshlet.create_task(
+                    task_id.as_deref(),
+                    &title,
+                    status.as_deref(),
+                    assignee.as_deref(),
+                    note.as_deref(),
+                    parse_visibility_arg(&visibility)?,
+                    parse_safety_profile_arg(&profile)?,
+                )?)?,
+                TaskCommand::Update {
+                    id,
+                    status,
+                    assignee,
+                    note,
+                    visibility,
+                    profile,
+                } => print_json(&meshlet.update_task(
+                    &id,
+                    status.as_deref(),
+                    assignee.as_deref(),
+                    note.as_deref(),
+                    parse_visibility_arg(&visibility)?,
+                    parse_safety_profile_arg(&profile)?,
+                )?)?,
+                TaskCommand::List { limit, profile } => print_json(
+                    &meshlet.list_tasks_scoped(limit, parse_safety_profile_arg(&profile)?)?,
+                )?,
+                TaskCommand::Show { id, profile } => print_json(
+                    &meshlet.show_task_scoped(&id, parse_safety_profile_arg(&profile)?)?,
+                )?,
+                TaskCommand::Timeline { id, limit, profile } => print_json(
+                    &meshlet.task_timeline(&id, limit, parse_safety_profile_arg(&profile)?)?,
+                )?,
+            }
+        }
+        Command::Mailbox { command } => {
+            let root = find_project_root()?;
+            let meshlet = Meshlet::open(&root)?;
+            match command {
+                MailboxCommand::Send {
+                    from_agent,
+                    to_agent,
+                    summary,
+                    task_id,
+                    body,
+                    reply_to,
+                    visibility,
+                    profile,
+                } => print_json(&meshlet.send_agent_message(
+                    &from_agent,
+                    &to_agent,
+                    &summary,
+                    task_id.as_deref(),
+                    body.as_deref(),
+                    reply_to.as_deref(),
+                    parse_visibility_arg(&visibility)?,
+                    parse_safety_profile_arg(&profile)?,
+                )?)?,
+                MailboxCommand::Inbox {
+                    agent,
+                    limit,
+                    profile,
+                } => print_json(&meshlet.list_mailbox(
+                    &agent,
+                    "inbox",
+                    limit,
+                    parse_safety_profile_arg(&profile)?,
+                )?)?,
+                MailboxCommand::Outbox {
+                    agent,
+                    limit,
+                    profile,
+                } => print_json(&meshlet.list_mailbox(
+                    &agent,
+                    "outbox",
+                    limit,
+                    parse_safety_profile_arg(&profile)?,
+                )?)?,
             }
         }
         Command::Evidence { command } => {
@@ -257,13 +503,53 @@ fn main() -> Result<()> {
                 EvidenceCommand::Show { id } => print_json(&meshlet.show_evidence(&id)?)?,
             }
         }
-        Command::Serve { mcp } => {
+        Command::Doctor { command } => {
+            let root = find_project_root()?;
+            let meshlet = Meshlet::open(&root)?;
+            match command {
+                DoctorCommand::Public => print_json(&meshlet.public_doctor()?)?,
+            }
+        }
+        Command::Export { command } => {
+            let root = find_project_root()?;
+            let meshlet = Meshlet::open(&root)?;
+            match command {
+                ExportCommand::Public { out, limit, format } => {
+                    let value = match format.as_str() {
+                        "json" => {
+                            let value = meshlet.public_export(limit)?;
+                            std::fs::write(&out, serde_json::to_string_pretty(&value)?)?;
+                            serde_json::json!({
+                                "status": "exported",
+                                "format": "json",
+                                "path": out,
+                            })
+                        }
+                        "okf" => {
+                            let value = meshlet.public_export_okf(&out, limit)?;
+                            serde_json::json!({
+                                "status": "exported",
+                                "format": "okf",
+                                "path": out,
+                                "documents": value["documents"],
+                            })
+                        }
+                        _ => anyhow::bail!("export format must be json or okf"),
+                    };
+                    print_json(&value)?;
+                }
+            }
+        }
+        Command::Okf { command } => match command {
+            OkfCommand::Doctor { bundle_dir } => print_json(&Meshlet::okf_doctor(bundle_dir)?)?,
+        },
+        Command::Serve { mcp, profile } => {
             if mcp.as_deref() != Some("stdio") {
                 anyhow::bail!("only `meshlet serve --mcp stdio` is supported");
             }
             let root = find_project_root()?;
             let meshlet = Meshlet::open(&root)?;
-            run_mcp_stdio(meshlet)?;
+            run_mcp_stdio_with_profile(meshlet, parse_safety_profile_arg(&profile)?)?;
         }
     }
     Ok(())

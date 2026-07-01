@@ -138,12 +138,80 @@ fn mcp_tool_call(meshlet: &Meshlet, params: &Value, profile: SafetyProfile) -> R
             meshlet.query_scoped_view(q, kind, namespace, limit, mode, profile)?
         }
         "meshlet_list_skills" => json!({ "skills": meshlet.list_skills_scoped(profile)? }),
-        "meshlet_list_tasks" => json!({ "tasks": meshlet.list_tasks(limit_arg(&args)?)? }),
+        "meshlet_list_tasks" => {
+            json!({ "tasks": meshlet.list_tasks_scoped(limit_arg(&args)?, profile)? })
+        }
         "meshlet_get_task" => {
             let id = str_field(&args, "id")?;
-            meshlet.show_task(id)?
+            meshlet.show_task_scoped(id, profile)?
         }
         "meshlet_get_digest" => meshlet.context_digest_limited(limit_arg(&args)?, profile)?,
+        "meshlet_create_task" => {
+            if profile == SafetyProfile::PublicSafe {
+                bail!("meshlet_create_task is disabled in public-safe profile");
+            }
+            serde_json::to_value(
+                meshlet.create_task(
+                    optional_string_field(&args, "task_id")?,
+                    str_field(&args, "title")?,
+                    optional_string_field(&args, "status")?,
+                    optional_string_field(&args, "assignee")?,
+                    optional_string_field(&args, "note")?,
+                    optional_string_field(&args, "visibility")?
+                        .map(str::parse::<EventVisibility>)
+                        .transpose()?
+                        .unwrap_or(EventVisibility::Private),
+                    profile,
+                )?,
+            )?
+        }
+        "meshlet_update_task" => {
+            if profile == SafetyProfile::PublicSafe {
+                bail!("meshlet_update_task is disabled in public-safe profile");
+            }
+            serde_json::to_value(
+                meshlet.update_task(
+                    str_field(&args, "id")?,
+                    optional_string_field(&args, "status")?,
+                    optional_string_field(&args, "assignee")?,
+                    optional_string_field(&args, "note")?,
+                    optional_string_field(&args, "visibility")?
+                        .map(str::parse::<EventVisibility>)
+                        .transpose()?
+                        .unwrap_or(EventVisibility::Private),
+                    profile,
+                )?,
+            )?
+        }
+        "meshlet_send_message" => {
+            if profile == SafetyProfile::PublicSafe {
+                bail!("meshlet_send_message is disabled in public-safe profile");
+            }
+            serde_json::to_value(
+                meshlet.send_agent_message(
+                    str_field(&args, "from")?,
+                    str_field(&args, "to")?,
+                    str_field(&args, "summary")?,
+                    optional_string_field(&args, "task_id")?,
+                    optional_string_field(&args, "body")?,
+                    optional_string_field(&args, "reply_to")?,
+                    optional_string_field(&args, "visibility")?
+                        .map(str::parse::<EventVisibility>)
+                        .transpose()?
+                        .unwrap_or(EventVisibility::Private),
+                    profile,
+                )?,
+            )?
+        }
+        "meshlet_get_mailbox" => meshlet.list_mailbox(
+            str_field(&args, "agent")?,
+            optional_string_field(&args, "direction")?.unwrap_or("inbox"),
+            limit_arg(&args)?,
+            profile,
+        )?,
+        "meshlet_get_timeline" => {
+            meshlet.task_timeline(str_field(&args, "task_id")?, limit_arg(&args)?, profile)?
+        }
         "meshlet_get_context" => {
             if profile == SafetyProfile::PublicSafe {
                 bail!(
@@ -167,11 +235,11 @@ fn mcp_read_resource(meshlet: &Meshlet, uri: &str, profile: SafetyProfile) -> Re
         }
         "meshlet://tasks" => json!({
             "limit": DEFAULT_LIMIT,
-            "tasks": meshlet.list_tasks(DEFAULT_LIMIT)?,
+            "tasks": meshlet.list_tasks_scoped(DEFAULT_LIMIT, profile)?,
         }),
         "meshlet://evidence/recent" => json!({
             "limit": DEFAULT_LIMIT,
-            "evidence": meshlet.list_evidence(DEFAULT_LIMIT)?,
+            "evidence": meshlet.list_evidence_scoped(DEFAULT_LIMIT, profile)?,
         }),
         "meshlet://graph/namespaces" => json!({
             "namespaces": meshlet.graph_namespaces()?,
@@ -229,6 +297,79 @@ fn mcp_tools() -> Value {
                     "id": { "type": "string" }
                 },
                 "required": ["id"]
+            }
+        },
+        {
+            "name": "meshlet_create_task",
+            "description": "Create a typed local Meshlet task event.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "title": { "type": "string" },
+                    "status": { "type": "string", "enum": ["open", "in_progress", "blocked", "done", "canceled"] },
+                    "assignee": { "type": "string" },
+                    "note": { "type": "string" },
+                    "visibility": { "type": "string", "enum": ["private", "local", "public"] }
+                },
+                "required": ["title"]
+            }
+        },
+        {
+            "name": "meshlet_update_task",
+            "description": "Update a typed local Meshlet task event.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "status": { "type": "string", "enum": ["open", "in_progress", "blocked", "done", "canceled"] },
+                    "assignee": { "type": "string" },
+                    "note": { "type": "string" },
+                    "visibility": { "type": "string", "enum": ["private", "local", "public"] }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "meshlet_send_message",
+            "description": "Send a typed local agent message.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string" },
+                    "to": { "type": "string" },
+                    "summary": { "type": "string" },
+                    "task_id": { "type": "string" },
+                    "body": { "type": "string" },
+                    "reply_to": { "type": "string" },
+                    "visibility": { "type": "string", "enum": ["private", "local", "public"] }
+                },
+                "required": ["from", "to", "summary"]
+            }
+        },
+        {
+            "name": "meshlet_get_mailbox",
+            "description": "Read an agent inbox or outbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": { "type": "string" },
+                    "direction": { "type": "string", "enum": ["inbox", "outbox"] },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                },
+                "required": ["agent"]
+            }
+        },
+        {
+            "name": "meshlet_get_timeline",
+            "description": "Replay a compact task timeline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                },
+                "required": ["task_id"]
             }
         },
         {

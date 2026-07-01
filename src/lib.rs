@@ -21,8 +21,12 @@ pub const DB_DIR: &str = ".meshlet";
 pub const DB_FILE: &str = "meshlet.db";
 pub const DEFAULT_LIMIT: u32 = 20;
 pub const MAX_LIMIT: u32 = 100;
-const SCHEMA_VERSION: &str = "4";
+const SCHEMA_VERSION: &str = "6";
 const CONTEXT_SCHEMA_VERSION: i64 = 1;
+const TASK_SCHEMA_VERSION: i64 = 1;
+const MESSAGE_SCHEMA_VERSION: i64 = 1;
+
+const TASK_STATUSES: &[&str] = &["open", "in_progress", "blocked", "done", "canceled"];
 
 const EVENT_TYPES: &[&str] = &[
     "repo.initialized",
@@ -224,6 +228,20 @@ struct Bounded<T> {
     truncated: bool,
 }
 
+struct OkfDocument {
+    id: String,
+    item_type: String,
+    title: String,
+    description: String,
+    resource: String,
+    tags: Vec<String>,
+    timestamp: String,
+    source_event_id: String,
+    visibility: String,
+    relative_path: String,
+    body: String,
+}
+
 impl Meshlet {
     pub fn init(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
@@ -264,6 +282,8 @@ impl Meshlet {
 
     fn apply_schema(&self) -> Result<()> {
         let had_contexts = self.has_table("contexts")?;
+        let had_tasks = self.has_table("tasks")?;
+        let had_mailbox_messages = self.has_table("mailbox_messages")?;
         self.conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
@@ -322,10 +342,48 @@ impl Meshlet {
                 schema_version INTEGER NOT NULL,
                 attrs_json TEXT
             );
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL,
+                assignee TEXT,
+                note TEXT,
+                visibility TEXT NOT NULL,
+                created_event_id TEXT NOT NULL,
+                updated_event_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                attrs_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS mailbox_messages (
+                id TEXT PRIMARY KEY,
+                from_agent TEXT NOT NULL,
+                to_agent TEXT NOT NULL,
+                task_id TEXT,
+                summary TEXT NOT NULL,
+                body TEXT,
+                reply_to TEXT,
+                visibility TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                attrs_json TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_contexts_visibility_created_at
                 ON contexts(visibility, created_at);
             CREATE INDEX IF NOT EXISTS idx_contexts_source_event_id
                 ON contexts(source_event_id);
+            CREATE INDEX IF NOT EXISTS idx_tasks_visibility_updated_at
+                ON tasks(visibility, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status
+                ON tasks(assignee, status);
+            CREATE INDEX IF NOT EXISTS idx_mailbox_to_visibility_created_at
+                ON mailbox_messages(to_agent, visibility, created_at);
+            CREATE INDEX IF NOT EXISTS idx_mailbox_from_visibility_created_at
+                ON mailbox_messages(from_agent, visibility, created_at);
+            CREATE INDEX IF NOT EXISTS idx_mailbox_task_id
+                ON mailbox_messages(task_id);
             "#,
         )?;
         if !self.has_column("events", "visibility")? {
@@ -345,11 +403,18 @@ impl Meshlet {
                 ON skills(visibility);
             "#,
         )?;
+        let needs_fts_backfill = self.ensure_fts_tables()?;
         if needs_read_model_visibility {
             self.backfill_read_model_visibility()?;
         }
         if !had_contexts {
             self.backfill_contexts_from_events()?;
+        }
+        if !had_tasks || !had_mailbox_messages {
+            self.backfill_mailbox_from_events()?;
+        }
+        if needs_fts_backfill {
+            self.rebuild_fts()?;
         }
         self.conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?1)",
@@ -371,6 +436,36 @@ impl Meshlet {
                 changed = true;
             }
         }
+        Ok(changed)
+    }
+
+    fn ensure_fts_tables(&self) -> Result<bool> {
+        let mut changed = false;
+        for table in [
+            "events_fts",
+            "contexts_fts",
+            "graph_nodes_fts",
+            "graph_edges_fts",
+            "skills_fts",
+        ] {
+            changed |= !self.has_table(table)?;
+        }
+        self.conn
+            .execute_batch(
+                r#"
+                CREATE VIRTUAL TABLE IF NOT EXISTS events_fts
+                    USING fts5(id UNINDEXED, type, actor, text);
+                CREATE VIRTUAL TABLE IF NOT EXISTS contexts_fts
+                    USING fts5(id UNINDEXED, kind, namespace, title, summary);
+                CREATE VIRTUAL TABLE IF NOT EXISTS graph_nodes_fts
+                    USING fts5(id UNINDEXED, kind, namespace, label);
+                CREATE VIRTUAL TABLE IF NOT EXISTS graph_edges_fts
+                    USING fts5(id UNINDEXED, kind, namespace, label);
+                CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts
+                    USING fts5(name UNINDEXED, searchable_name, kind, summary);
+                "#,
+            )
+            .context("create FTS5 tables")?;
         Ok(changed)
     }
 
@@ -477,38 +572,57 @@ impl Meshlet {
         }
         validate_payload_safety(&payload, profile)?;
         validate_event_payload(event_type, &payload)?;
-        let prev_hash = self.latest_hash()?;
-        let id = Uuid::new_v4().to_string();
-        let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        let hash = event_hash(
-            &id,
-            event_type,
-            &created_at,
-            actor,
-            &payload,
-            prev_hash.as_deref(),
-        )?;
-        let next_seq = self.next_seq()?;
-        self.conn.execute(
-            "INSERT INTO events(id, seq, type, created_at, actor, payload_json, visibility, hash, prev_hash)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                id,
-                next_seq,
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .context("begin event append transaction")?;
+        let result = (|| -> Result<Event> {
+            self.validate_event_semantics(event_type, &payload)?;
+            let prev_hash = self.latest_hash()?;
+            let id = Uuid::new_v4().to_string();
+            let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+            let hash = event_hash(
+                &id,
                 event_type,
-                created_at,
+                &created_at,
                 actor,
-                canonical_json(&payload)?,
-                visibility.as_str(),
-                hash,
-                prev_hash
-            ],
-        )?;
-        let event = self
-            .get_event_by_seq(next_seq)?
-            .ok_or_else(|| anyhow!("inserted event not found"))?;
-        self.apply_event(&event)?;
-        Ok(event)
+                &payload,
+                prev_hash.as_deref(),
+            )?;
+            let next_seq = self.next_seq()?;
+            self.conn.execute(
+                "INSERT INTO events(id, seq, type, created_at, actor, payload_json, visibility, hash, prev_hash)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    id,
+                    next_seq,
+                    event_type,
+                    created_at,
+                    actor,
+                    canonical_json(&payload)?,
+                    visibility.as_str(),
+                    hash,
+                    prev_hash
+                ],
+            )?;
+            let event = self
+                .get_event_by_seq(next_seq)?
+                .ok_or_else(|| anyhow!("inserted event not found"))?;
+            self.upsert_event_fts(&event)?;
+            self.apply_event(&event)?;
+            Ok(event)
+        })();
+        match result {
+            Ok(event) => {
+                self.conn
+                    .execute_batch("COMMIT")
+                    .context("commit event append transaction")?;
+                Ok(event)
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
     }
 
     pub fn list_events(&self, limit: u32) -> Result<Vec<Event>> {
@@ -552,6 +666,65 @@ impl Meshlet {
             .ok_or_else(|| anyhow!("event not found: {id}"))
     }
 
+    fn validate_event_semantics(&self, event_type: &str, payload: &Value) -> Result<()> {
+        match event_type {
+            "task.created" => {
+                if let Some(task_id) = nonempty_string(payload, "task_id")
+                    && self.task_exists(task_id)?
+                {
+                    bail!("task already exists: {task_id}");
+                }
+            }
+            "task.updated" => {
+                let task_id = required_nonempty_string(payload, "task_id")?;
+                let Some(current_status) = self.task_status(task_id)? else {
+                    bail!("task not found: {task_id}");
+                };
+                if let Some(next_status) = nonempty_string(payload, "status") {
+                    validate_task_transition(&current_status, next_status)?;
+                }
+            }
+            "agent.message" => {
+                if let Some(task_id) = nonempty_string(payload, "task_id")
+                    && !self.task_exists(task_id)?
+                {
+                    bail!("task not found: {task_id}");
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn task_exists(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row("SELECT 1 FROM tasks WHERE id = ?1", [id], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    fn task_status(&self, id: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row("SELECT status FROM tasks WHERE id = ?1", [id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn task_row(&self, id: &str) -> Result<Option<Value>> {
+        self.conn
+            .query_row(
+                "SELECT id, title, status, assignee, note, visibility, created_event_id, updated_event_id, created_at, updated_at, schema_version, attrs_json
+                 FROM tasks WHERE id = ?1",
+                [id],
+                task_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn add_skill_manifest(&self, manifest_path: impl AsRef<Path>) -> Result<Event> {
         let manifest_path = manifest_path.as_ref();
         let text = fs::read_to_string(manifest_path)
@@ -580,6 +753,22 @@ impl Meshlet {
 
     pub fn list_skills_limited(&self, limit: u32, profile: SafetyProfile) -> Result<Vec<Value>> {
         Ok(self.skills_bounded(Some(limit), profile)?.items)
+    }
+
+    pub fn search_skills(&self, q: &str, limit: u32, profile: SafetyProfile) -> Result<Value> {
+        if q.trim().is_empty() {
+            bail!("query must not be empty");
+        }
+        let query = fts_query(q)?;
+        let bounded = self.query_skills(&query, limit, profile)?;
+        Ok(json!({
+            "q": q,
+            "limit": clamp_limit(limit),
+            "skills": {
+                "items": bounded.items,
+                "truncated": bounded.truncated,
+            },
+        }))
     }
 
     fn skills_bounded(&self, limit: Option<u32>, profile: SafetyProfile) -> Result<Bounded<Value>> {
@@ -619,6 +808,35 @@ impl Meshlet {
         })
     }
 
+    fn query_skills(
+        &self,
+        query: &str,
+        limit: u32,
+        profile: SafetyProfile,
+    ) -> Result<Bounded<Value>> {
+        let limit = clamp_limit(limit);
+        let visibility = visibility_clause(profile);
+        let sql = format!(
+            "SELECT skills.name, skills.version, skills.manifest_path, skills.entry, skills.permissions_json, skills.description, skills.source_event_id, skills.visibility
+             FROM skills
+             JOIN skills_fts ON skills.name = skills_fts.name
+             WHERE skills_fts MATCH ?1
+               AND skills.{visibility}
+             ORDER BY bm25(skills_fts), skills.name
+             LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut skills = stmt
+            .query_map(params![query, limit + 1], skill_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = skills.len() > limit as usize;
+        skills.truncate(limit as usize);
+        Ok(Bounded {
+            items: skills,
+            truncated,
+        })
+    }
+
     pub fn show_skill(&self, name: &str) -> Result<Value> {
         self.conn
             .query_row(
@@ -632,21 +850,240 @@ impl Meshlet {
     }
 
     pub fn list_tasks(&self, limit: u32) -> Result<Vec<Value>> {
-        let limit = clamp_limit(limit) as usize;
-        let mut tasks = self.task_views()?;
-        tasks.truncate(limit);
-        Ok(tasks)
+        self.list_tasks_scoped(limit, SafetyProfile::LocalTrusted)
     }
 
     pub fn show_task(&self, id: &str) -> Result<Value> {
-        self.task_views()?
-            .into_iter()
-            .find(|task| task["id"] == id)
+        self.show_task_scoped(id, SafetyProfile::LocalTrusted)
+    }
+
+    pub fn list_tasks_scoped(&self, limit: u32, profile: SafetyProfile) -> Result<Vec<Value>> {
+        if profile == SafetyProfile::PublicSafe {
+            let limit = clamp_limit(limit) as usize;
+            let mut tasks = self.task_views_from_events(profile)?;
+            tasks.truncate(limit);
+            return Ok(tasks);
+        }
+        Ok(self.tasks_bounded(limit, profile)?.items)
+    }
+
+    pub fn show_task_scoped(&self, id: &str, profile: SafetyProfile) -> Result<Value> {
+        if profile == SafetyProfile::PublicSafe {
+            return self
+                .task_views_from_events(profile)?
+                .into_iter()
+                .find(|task| task["id"] == id)
+                .ok_or_else(|| anyhow!("task not found: {id}"));
+        }
+        let visibility = visibility_clause(profile);
+        let sql = format!(
+            "SELECT id, title, status, assignee, note, visibility, created_event_id, updated_event_id, created_at, updated_at, schema_version, attrs_json
+             FROM tasks WHERE id = ?1 AND {visibility}"
+        );
+        self.conn
+            .query_row(&sql, [id], task_from_row)
+            .optional()?
             .ok_or_else(|| anyhow!("task not found: {id}"))
     }
 
+    fn tasks_bounded(&self, limit: u32, profile: SafetyProfile) -> Result<Bounded<Value>> {
+        let limit = clamp_limit(limit);
+        let visibility = visibility_clause(profile);
+        let sql = format!(
+            "SELECT id, title, status, assignee, note, visibility, created_event_id, updated_event_id, created_at, updated_at, schema_version, attrs_json
+             FROM tasks
+             WHERE {visibility}
+             ORDER BY updated_at DESC, id
+             LIMIT ?1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut tasks = stmt
+            .query_map([limit + 1], task_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = tasks.len() > limit as usize;
+        tasks.truncate(limit as usize);
+        Ok(Bounded {
+            items: tasks,
+            truncated,
+        })
+    }
+
+    pub fn create_task(
+        &self,
+        task_id: Option<&str>,
+        title: &str,
+        status: Option<&str>,
+        assignee: Option<&str>,
+        note: Option<&str>,
+        visibility: EventVisibility,
+        profile: SafetyProfile,
+    ) -> Result<Event> {
+        let mut payload = serde_json::Map::new();
+        if let Some(task_id) = task_id {
+            payload.insert("task_id".to_string(), json!(task_id));
+        }
+        payload.insert("title".to_string(), json!(title));
+        if let Some(status) = status {
+            payload.insert("status".to_string(), json!(status));
+        }
+        if let Some(assignee) = assignee {
+            payload.insert("assignee".to_string(), json!(assignee));
+        }
+        if let Some(note) = note {
+            payload.insert("note".to_string(), json!(note));
+        }
+        self.append_event_with_options(
+            "task.created",
+            "cli",
+            Value::Object(payload),
+            visibility,
+            profile,
+        )
+    }
+
+    pub fn update_task(
+        &self,
+        task_id: &str,
+        status: Option<&str>,
+        assignee: Option<&str>,
+        note: Option<&str>,
+        visibility: EventVisibility,
+        profile: SafetyProfile,
+    ) -> Result<Event> {
+        let mut payload = serde_json::Map::new();
+        payload.insert("task_id".to_string(), json!(task_id));
+        if let Some(status) = status {
+            payload.insert("status".to_string(), json!(status));
+        }
+        if let Some(assignee) = assignee {
+            payload.insert("assignee".to_string(), json!(assignee));
+        }
+        if let Some(note) = note {
+            payload.insert("note".to_string(), json!(note));
+        }
+        self.append_event_with_options(
+            "task.updated",
+            "cli",
+            Value::Object(payload),
+            visibility,
+            profile,
+        )
+    }
+
+    pub fn send_agent_message(
+        &self,
+        from_agent: &str,
+        to_agent: &str,
+        summary: &str,
+        task_id: Option<&str>,
+        body: Option<&str>,
+        reply_to: Option<&str>,
+        visibility: EventVisibility,
+        profile: SafetyProfile,
+    ) -> Result<Event> {
+        let mut payload = serde_json::Map::new();
+        payload.insert("from".to_string(), json!(from_agent));
+        payload.insert("to".to_string(), json!(to_agent));
+        payload.insert("summary".to_string(), json!(summary));
+        if let Some(task_id) = task_id {
+            payload.insert("task_id".to_string(), json!(task_id));
+        }
+        if let Some(body) = body {
+            payload.insert("body".to_string(), json!(body));
+        }
+        if let Some(reply_to) = reply_to {
+            payload.insert("reply_to".to_string(), json!(reply_to));
+        }
+        self.append_event_with_options(
+            "agent.message",
+            from_agent,
+            Value::Object(payload),
+            visibility,
+            profile,
+        )
+    }
+
+    pub fn list_mailbox(
+        &self,
+        agent: &str,
+        direction: &str,
+        limit: u32,
+        profile: SafetyProfile,
+    ) -> Result<Value> {
+        if agent.trim().is_empty() {
+            bail!("agent must not be empty");
+        }
+        let column = match direction {
+            "inbox" => "to_agent",
+            "outbox" => "from_agent",
+            _ => bail!("mailbox direction must be inbox or outbox"),
+        };
+        let limit = clamp_limit(limit);
+        let visibility = visibility_clause(profile);
+        let sql = format!(
+            "SELECT id, from_agent, to_agent, task_id, summary, body, reply_to, visibility, source_event_id, created_at, schema_version, attrs_json
+             FROM mailbox_messages
+             WHERE {column} = ?1 AND {visibility}
+             ORDER BY created_at DESC, id
+             LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut messages = stmt
+            .query_map(params![agent, limit + 1], message_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = messages.len() > limit as usize;
+        messages.truncate(limit as usize);
+        Ok(json!({
+            "agent": agent,
+            "direction": direction,
+            "limit": limit,
+            "messages": {
+                "items": messages,
+                "truncated": truncated,
+            },
+        }))
+    }
+
+    pub fn task_timeline(
+        &self,
+        task_id: &str,
+        limit: u32,
+        profile: SafetyProfile,
+    ) -> Result<Value> {
+        if task_id.trim().is_empty() {
+            bail!("task_id must not be empty");
+        }
+        let limit = clamp_limit(limit) as usize;
+        let mut items = Vec::new();
+        for record in self.event_records_ascending()? {
+            if profile == SafetyProfile::PublicSafe
+                && record.event.visibility != EventVisibility::Public
+            {
+                continue;
+            }
+            if event_task_id(&record.event).as_deref() == Some(task_id) {
+                items.push(compact_timeline_event(record.seq, &record.event));
+            }
+        }
+        let truncated = items.len() > limit;
+        items.truncate(limit);
+        Ok(json!({
+            "task_id": task_id,
+            "profile": profile.as_str(),
+            "limit": limit,
+            "items": items,
+            "truncated": truncated,
+        }))
+    }
+
     pub fn list_evidence(&self, limit: u32) -> Result<Vec<Value>> {
-        self.graph_nodes_limited(Some("evidence"), limit)
+        self.list_evidence_scoped(limit, SafetyProfile::LocalTrusted)
+    }
+
+    pub fn list_evidence_scoped(&self, limit: u32, profile: SafetyProfile) -> Result<Vec<Value>> {
+        Ok(self
+            .graph_nodes_bounded(Some("evidence"), limit, profile)?
+            .items)
     }
 
     pub fn show_evidence(&self, id: &str) -> Result<Value> {
@@ -731,8 +1168,12 @@ impl Meshlet {
         self.conn.execute("DELETE FROM graph_edges", [])?;
         self.conn.execute("DELETE FROM graph_nodes", [])?;
         self.conn.execute("DELETE FROM skills", [])?;
+        self.conn.execute("DELETE FROM tasks", [])?;
+        self.conn.execute("DELETE FROM mailbox_messages", [])?;
+        self.clear_fts()?;
         let events = self.events_ascending()?;
         for event in events {
+            self.upsert_event_fts(&event)?;
             self.apply_event(&event)?;
         }
         Ok(())
@@ -743,11 +1184,11 @@ impl Meshlet {
     }
 
     pub fn search_contexts(&self, q: &str, limit: u32, profile: SafetyProfile) -> Result<Value> {
-        let needle = q.trim().to_lowercase();
-        if needle.is_empty() {
+        if q.trim().is_empty() {
             bail!("query must not be empty");
         }
-        let bounded = self.contexts_bounded(Some(&needle), limit, profile)?;
+        let query = fts_query(q)?;
+        let bounded = self.contexts_bounded(Some(&query), limit, profile)?;
         Ok(json!({
             "q": q,
             "limit": clamp_limit(limit),
@@ -760,22 +1201,20 @@ impl Meshlet {
 
     fn contexts_bounded(
         &self,
-        needle: Option<&str>,
+        query: Option<&str>,
         limit: u32,
         profile: SafetyProfile,
     ) -> Result<Bounded<Value>> {
         let limit = clamp_limit(limit);
         let visibility = visibility_clause(profile);
-        let sql = if needle.is_some() {
+        let sql = if query.is_some() {
             format!(
-                "SELECT id, kind, namespace, title, summary, visibility, source_event_id, created_at, updated_at, schema_version, attrs_json
+                "SELECT contexts.id, contexts.kind, contexts.namespace, contexts.title, contexts.summary, contexts.visibility, contexts.source_event_id, contexts.created_at, contexts.updated_at, contexts.schema_version, contexts.attrs_json
                  FROM contexts
-                 WHERE {visibility}
-                   AND (instr(lower(kind), ?1) > 0
-                    OR instr(lower(coalesce(namespace, '')), ?1) > 0
-                    OR instr(lower(coalesce(title, '')), ?1) > 0
-                    OR instr(lower(summary), ?1) > 0)
-                 ORDER BY created_at DESC, id
+                 JOIN contexts_fts ON contexts.id = contexts_fts.id
+                 WHERE contexts_fts MATCH ?1
+                   AND contexts.{visibility}
+                 ORDER BY bm25(contexts_fts), contexts.created_at DESC, contexts.id
                  LIMIT ?2"
             )
         } else {
@@ -788,8 +1227,8 @@ impl Meshlet {
             )
         };
         let mut stmt = self.conn.prepare(&sql)?;
-        let mut contexts = if let Some(needle) = needle {
-            stmt.query_map(params![needle, limit + 1], context_from_row)?
+        let mut contexts = if let Some(query) = query {
+            stmt.query_map(params![query, limit + 1], context_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             stmt.query_map([limit + 1], context_from_row)?
@@ -951,14 +1390,14 @@ impl Meshlet {
             "counts": {
                 "events": self.event_count()?,
                 "skills": self.list_skills_scoped(profile)?.len(),
-                "tasks": self.list_tasks(limit)?.len(),
+                "tasks": self.list_tasks_scoped(limit, profile)?.len(),
                 "namespaces": self.graph_namespaces()?.len(),
             },
             "events_recent": {
                 "items": event_items,
                 "truncated": events.truncated,
             },
-            "tasks": self.list_tasks(limit)?,
+            "tasks": self.list_tasks_scoped(limit, profile)?,
             "graph": {
                 "nodes": {
                     "items": nodes.items.into_iter().map(compact_node).collect::<Vec<_>>(),
@@ -1060,10 +1499,10 @@ impl Meshlet {
         limit: u32,
         profile: SafetyProfile,
     ) -> Result<Value> {
-        let needle = q.trim().to_lowercase();
-        if needle.is_empty() {
+        if q.trim().is_empty() {
             bail!("query must not be empty");
         }
+        let query = fts_query(q)?;
         if namespace.is_some_and(|value| value.trim().is_empty()) {
             bail!("namespace must not be empty");
         }
@@ -1073,17 +1512,17 @@ impl Meshlet {
         }
         let limit = clamp_limit(limit);
         let events = if matches!(kind, "all" | "events") {
-            Some(self.query_events(&needle, limit)?)
+            Some(self.query_events(&query, limit, profile)?)
         } else {
             None
         };
         let nodes = if matches!(kind, "all" | "nodes") {
-            Some(self.query_nodes(&needle, namespace, limit, profile)?)
+            Some(self.query_nodes(&query, namespace, limit, profile)?)
         } else {
             None
         };
         let edges = if matches!(kind, "all" | "edges") {
-            Some(self.query_edges(&needle, namespace, limit, profile)?)
+            Some(self.query_edges(&query, namespace, limit, profile)?)
         } else {
             None
         };
@@ -1135,6 +1574,13 @@ impl Meshlet {
             .filter(|event| event.visibility == EventVisibility::Public)
             .map(|event| compact_event(&event))
             .collect::<Vec<_>>();
+        let tasks = self.list_tasks_scoped(limit, SafetyProfile::PublicSafe)?;
+        let messages = self.public_messages_bounded(limit)?;
+        let timelines = tasks
+            .iter()
+            .filter_map(|task| string_value(task, "id"))
+            .map(|task_id| self.task_timeline(task_id, limit, SafetyProfile::PublicSafe))
+            .collect::<Result<Vec<_>>>()?;
         let nodes = filter_public_values(
             self.graph_nodes_limited(None, limit)?,
             SafetyProfile::PublicSafe,
@@ -1154,12 +1600,263 @@ impl Meshlet {
             "profile": "public-safe",
             "limit": limit,
             "events": events,
+            "tasks": tasks,
+            "mailbox": {
+                "messages": {
+                    "items": messages.items.into_iter().map(compact_message).collect::<Vec<_>>(),
+                    "truncated": messages.truncated,
+                }
+            },
+            "timelines": timelines,
             "graph": {
                 "nodes": nodes,
                 "edges": edges,
             },
             "redaction_report": self.public_doctor()?["redaction_report"].clone(),
         }))
+    }
+
+    pub fn public_export_okf(&self, out_dir: impl AsRef<Path>, limit: u32) -> Result<Value> {
+        let out_dir = out_dir.as_ref();
+        prepare_okf_output_dir(out_dir)?;
+        let limit = clamp_limit(limit);
+        let public_report = self.public_doctor()?;
+        let events = self
+            .list_events(limit)?
+            .into_iter()
+            .filter(|event| event.visibility == EventVisibility::Public)
+            .collect::<Vec<_>>();
+        let contexts = self.list_contexts_limited(limit, SafetyProfile::PublicSafe)?;
+        let tasks = self.list_tasks_scoped(limit, SafetyProfile::PublicSafe)?;
+        let skills = self.list_skills_scoped(SafetyProfile::PublicSafe)?;
+        let evidence = self.list_evidence_scoped(limit, SafetyProfile::PublicSafe)?;
+        let messages = self.public_messages_bounded(limit)?;
+        let edges = self
+            .graph_edges_bounded(None, limit, SafetyProfile::PublicSafe)?
+            .items;
+        let mut documents = Vec::new();
+
+        for context in contexts {
+            let id = string_value(&context, "id").unwrap_or("context:unknown");
+            let title = string_value(&context, "title")
+                .or_else(|| string_value(&context, "summary"))
+                .unwrap_or(id);
+            let description = string_value(&context, "summary").unwrap_or(title);
+            let mut body = String::new();
+            body.push_str(description);
+            body.push_str("\n\n## Context\n");
+            body.push_str(&metadata_line("Kind", string_value(&context, "kind")));
+            body.push_str(&metadata_line(
+                "Namespace",
+                string_value(&context, "namespace"),
+            ));
+            documents.push(OkfDocument {
+                id: id.to_string(),
+                item_type: "Meshlet Context".to_string(),
+                title: title.to_string(),
+                description: description.to_string(),
+                resource: format!("meshlet://contexts/{id}"),
+                tags: vec!["meshlet".to_string(), "context".to_string()],
+                timestamp: string_value(&context, "updated_at")
+                    .or_else(|| string_value(&context, "created_at"))
+                    .unwrap_or("")
+                    .to_string(),
+                source_event_id: string_value(&context, "source_event_id")
+                    .unwrap_or("")
+                    .to_string(),
+                visibility: "public".to_string(),
+                relative_path: format!("contexts/{}.md", okf_slug(id)),
+                body,
+            });
+        }
+
+        for task in tasks {
+            let id = string_value(&task, "id").unwrap_or("task:unknown");
+            let title = string_value(&task, "title").unwrap_or(id);
+            let description = string_value(&task, "note")
+                .or_else(|| string_value(&task, "status"))
+                .unwrap_or(title);
+            let mut body = String::new();
+            body.push_str(description);
+            body.push_str("\n\n## Task\n");
+            body.push_str(&metadata_line("Status", string_value(&task, "status")));
+            body.push_str(&metadata_line("Assignee", string_value(&task, "assignee")));
+            let timeline = self.task_timeline(id, limit, SafetyProfile::PublicSafe)?;
+            if let Some(items) = timeline.get("items").and_then(Value::as_array)
+                && !items.is_empty()
+            {
+                body.push_str("\n## Timeline\n");
+                for item in items {
+                    let event_type = string_value(item, "type").unwrap_or("event");
+                    let created_at = string_value(item, "created_at").unwrap_or("");
+                    let event_id = string_value(item, "id").unwrap_or("");
+                    body.push_str(&format!("- {created_at} `{event_type}` `{event_id}`\n"));
+                }
+            }
+            documents.push(OkfDocument {
+                id: format!("task:{id}"),
+                item_type: "Meshlet Task".to_string(),
+                title: title.to_string(),
+                description: description.to_string(),
+                resource: format!("meshlet://tasks/{id}"),
+                tags: vec!["meshlet".to_string(), "task".to_string()],
+                timestamp: string_value(&task, "updated_at")
+                    .or_else(|| string_value(&task, "created_at"))
+                    .unwrap_or("")
+                    .to_string(),
+                source_event_id: string_value(&task, "updated_event_id")
+                    .or_else(|| string_value(&task, "created_event_id"))
+                    .unwrap_or("")
+                    .to_string(),
+                visibility: "public".to_string(),
+                relative_path: format!("tasks/{}.md", okf_slug(id)),
+                body,
+            });
+        }
+
+        for message in &messages.items {
+            let id = string_value(message, "id").unwrap_or("message:unknown");
+            let summary = string_value(message, "summary").unwrap_or(id);
+            let mut body = String::new();
+            body.push_str(summary);
+            body.push_str("\n\n## Message\n");
+            body.push_str(&metadata_line("From", string_value(message, "from")));
+            body.push_str(&metadata_line("To", string_value(message, "to")));
+            body.push_str(&metadata_line("Task", string_value(message, "task_id")));
+            body.push_str(&metadata_line(
+                "Reply To",
+                string_value(message, "reply_to"),
+            ));
+            documents.push(OkfDocument {
+                id: id.to_string(),
+                item_type: "Meshlet Message".to_string(),
+                title: summary.to_string(),
+                description: summary.to_string(),
+                resource: format!("meshlet://messages/{id}"),
+                tags: vec!["meshlet".to_string(), "message".to_string()],
+                timestamp: string_value(message, "created_at")
+                    .unwrap_or("")
+                    .to_string(),
+                source_event_id: string_value(message, "source_event_id")
+                    .unwrap_or("")
+                    .to_string(),
+                visibility: "public".to_string(),
+                relative_path: format!("messages/{}.md", okf_slug(id)),
+                body,
+            });
+        }
+
+        for skill in skills {
+            let name = string_value(&skill, "name").unwrap_or("skill");
+            let description = string_value(&skill, "description").unwrap_or(name);
+            let mut body = String::new();
+            body.push_str(description);
+            body.push_str("\n\n## Skill\n");
+            body.push_str(&metadata_line("Version", string_value(&skill, "version")));
+            body.push_str(&metadata_line("Entry", string_value(&skill, "entry")));
+            body.push_str(&metadata_line(
+                "Permissions",
+                skill
+                    .get("permissions")
+                    .map(|value| value.to_string())
+                    .as_deref(),
+            ));
+            documents.push(OkfDocument {
+                id: format!("skill:{name}"),
+                item_type: "Meshlet Skill".to_string(),
+                title: name.to_string(),
+                description: description.to_string(),
+                resource: format!("meshlet://skills/{name}"),
+                tags: vec!["meshlet".to_string(), "skill".to_string()],
+                timestamp: String::new(),
+                source_event_id: string_value(&skill, "source_event_id")
+                    .unwrap_or("")
+                    .to_string(),
+                visibility: "public".to_string(),
+                relative_path: format!("skills/{}.md", okf_slug(name)),
+                body,
+            });
+        }
+
+        for item in evidence {
+            let id = string_value(&item, "id").unwrap_or("evidence:unknown");
+            let attrs = item.get("attrs").unwrap_or(&Value::Null);
+            let evidence_ref = string_value(attrs, "path")
+                .or_else(|| string_value(attrs, "ref"))
+                .unwrap_or(id);
+            let sha256 = string_value(attrs, "sha256").unwrap_or("");
+            let mut body = String::new();
+            body.push_str(evidence_ref);
+            body.push_str("\n\n# Citations\n");
+            body.push_str(&format!("- `{evidence_ref}`"));
+            if !sha256.is_empty() {
+                body.push_str(&format!(" sha256 `{sha256}`"));
+            }
+            body.push('\n');
+            documents.push(OkfDocument {
+                id: id.to_string(),
+                item_type: "Meshlet Evidence".to_string(),
+                title: evidence_ref.to_string(),
+                description: evidence_ref.to_string(),
+                resource: format!("meshlet://evidence/{id}"),
+                tags: vec!["meshlet".to_string(), "evidence".to_string()],
+                timestamp: String::new(),
+                source_event_id: string_value(&item, "source_event_id")
+                    .unwrap_or("")
+                    .to_string(),
+                visibility: "public".to_string(),
+                relative_path: format!("evidence/{}.md", okf_slug(id)),
+                body,
+            });
+        }
+
+        let path_by_id = documents
+            .iter()
+            .map(|doc| (doc.id.clone(), doc.relative_path.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for dir in ["contexts", "tasks", "messages", "skills", "evidence"] {
+            fs::create_dir_all(out_dir.join(dir))?;
+        }
+        fs::write(out_dir.join("index.md"), okf_index(&documents))?;
+        fs::write(out_dir.join("log.md"), okf_log(&events))?;
+        for doc in &documents {
+            let relations = okf_relation_lines(&doc.id, &edges, &path_by_id, &doc.relative_path);
+            fs::write(
+                out_dir.join(&doc.relative_path),
+                okf_document_text(doc, &relations),
+            )?;
+        }
+
+        Ok(json!({
+            "format": "meshlet-okf-public-export-v1",
+            "profile": "public-safe",
+            "path": out_dir.display().to_string(),
+            "limit": limit,
+            "documents": documents.len(),
+            "events": events.len(),
+            "messages": messages.items.len(),
+            "public_doctor": public_report,
+        }))
+    }
+
+    fn public_messages_bounded(&self, limit: u32) -> Result<Bounded<Value>> {
+        let limit = clamp_limit(limit);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_agent, to_agent, task_id, summary, body, reply_to, visibility, source_event_id, created_at, schema_version, attrs_json
+             FROM mailbox_messages
+             WHERE visibility = 'public'
+             ORDER BY created_at DESC, id
+             LIMIT ?1",
+        )?;
+        let mut messages = stmt
+            .query_map(params![limit + 1], message_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = messages.len() > limit as usize;
+        messages.truncate(limit as usize);
+        Ok(Bounded {
+            items: messages,
+            truncated,
+        })
     }
 
     pub fn public_doctor(&self) -> Result<Value> {
@@ -1194,19 +1891,74 @@ impl Meshlet {
         }))
     }
 
-    fn query_events(&self, needle: &str, limit: u32) -> Result<Bounded<Event>> {
+    pub fn okf_doctor(bundle_dir: impl AsRef<Path>) -> Result<Value> {
+        let bundle_dir = bundle_dir.as_ref();
+        if !bundle_dir.is_dir() {
+            bail!("OKF bundle path must be a directory");
+        }
+        let mut files = Vec::new();
+        collect_markdown_files(bundle_dir, &mut files)?;
+        files.sort();
+        let document_count = files.len();
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+        if files.is_empty() {
+            errors.push("OKF bundle contains no markdown documents".to_string());
+        }
+        for path in files {
+            let relative = relative_path(bundle_dir, &path);
+            let text = fs::read_to_string(&path)
+                .with_context(|| format!("read OKF document {}", path.display()))?;
+            if relative != "index.md" && relative != "log.md" {
+                match okf_frontmatter_type(&text) {
+                    Some(value) if !value.trim().is_empty() => {}
+                    Some(_) => {
+                        errors.push(format!("{relative}: frontmatter type must not be empty"))
+                    }
+                    None => errors.push(format!("{relative}: missing frontmatter")),
+                }
+            }
+            for link in markdown_links(&text) {
+                if link_is_external_or_anchor(&link) {
+                    continue;
+                }
+                let target = link.split('#').next().unwrap_or("");
+                if target.is_empty() || !target.ends_with(".md") {
+                    continue;
+                }
+                if !path.parent().unwrap_or(bundle_dir).join(target).exists() {
+                    warnings.push(format!("{relative}: broken link {link}"));
+                }
+            }
+        }
+        Ok(json!({
+            "ok": errors.is_empty(),
+            "documents": document_count,
+            "errors": errors,
+            "warnings": warnings,
+        }))
+    }
+
+    fn query_events(
+        &self,
+        query: &str,
+        limit: u32,
+        profile: SafetyProfile,
+    ) -> Result<Bounded<Event>> {
         let limit = clamp_limit(limit);
-        let mut stmt = self.conn.prepare(
-            "SELECT id, type, created_at, actor, payload_json, visibility, hash, prev_hash
+        let visibility = visibility_clause(profile);
+        let sql = format!(
+            "SELECT events.id, events.type, events.created_at, events.actor, events.payload_json, events.visibility, events.hash, events.prev_hash
              FROM events
-             WHERE instr(lower(type), ?1) > 0
-                OR instr(lower(actor), ?1) > 0
-                OR instr(lower(payload_json), ?1) > 0
-             ORDER BY seq DESC
-             LIMIT ?2",
-        )?;
+             JOIN events_fts ON events.id = events_fts.id
+             WHERE events_fts MATCH ?1
+               AND events.{visibility}
+             ORDER BY bm25(events_fts), events.created_at DESC, events.id
+             LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut events = stmt
-            .query_map(params![needle, limit + 1], event_from_row)?
+            .query_map(params![query, limit + 1], event_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let truncated = events.len() > limit as usize;
         events.truncate(limit as usize);
@@ -1218,46 +1970,41 @@ impl Meshlet {
 
     fn query_nodes(
         &self,
-        needle: &str,
+        query: &str,
         namespace: Option<&str>,
         limit: u32,
         profile: SafetyProfile,
     ) -> Result<Bounded<Value>> {
         let limit = clamp_limit(limit);
         let visibility = visibility_clause(profile);
-        let namespace_filter = namespace.map(namespace_json_fragment).transpose()?;
-        let sql = if namespace_filter.is_some() {
+        let sql = if namespace.is_some() {
             format!(
-                "SELECT id, kind, label, attrs_json, source_event_id, visibility
-             FROM graph_nodes
-             WHERE {visibility}
-               AND (instr(lower(id), ?1) > 0
-                OR instr(lower(kind), ?1) > 0
-                OR instr(lower(coalesce(label, '')), ?1) > 0
-                OR instr(lower(attrs_json), ?1) > 0)
-               AND instr(attrs_json, ?2) > 0
-             ORDER BY id
-             LIMIT ?3"
+                "SELECT graph_nodes.id, graph_nodes.kind, graph_nodes.label, graph_nodes.attrs_json, graph_nodes.source_event_id, graph_nodes.visibility
+                 FROM graph_nodes
+                 JOIN graph_nodes_fts ON graph_nodes.id = graph_nodes_fts.id
+                 WHERE graph_nodes_fts MATCH ?1
+                   AND graph_nodes.{visibility}
+                   AND graph_nodes_fts.namespace = ?2
+                 ORDER BY bm25(graph_nodes_fts), graph_nodes.id
+                 LIMIT ?3"
             )
         } else {
             format!(
-                "SELECT id, kind, label, attrs_json, source_event_id, visibility
-             FROM graph_nodes
-             WHERE {visibility}
-               AND (instr(lower(id), ?1) > 0
-                OR instr(lower(kind), ?1) > 0
-                OR instr(lower(coalesce(label, '')), ?1) > 0
-                OR instr(lower(attrs_json), ?1) > 0)
-             ORDER BY id
-             LIMIT ?2"
+                "SELECT graph_nodes.id, graph_nodes.kind, graph_nodes.label, graph_nodes.attrs_json, graph_nodes.source_event_id, graph_nodes.visibility
+                 FROM graph_nodes
+                 JOIN graph_nodes_fts ON graph_nodes.id = graph_nodes_fts.id
+                 WHERE graph_nodes_fts MATCH ?1
+                   AND graph_nodes.{visibility}
+                 ORDER BY bm25(graph_nodes_fts), graph_nodes.id
+                 LIMIT ?2"
             )
         };
         let mut stmt = self.conn.prepare(&sql)?;
-        let mut nodes = if let Some(filter) = namespace_filter {
-            stmt.query_map(params![needle, filter, limit + 1], node_from_row)?
+        let mut nodes = if let Some(namespace) = namespace {
+            stmt.query_map(params![query, namespace, limit + 1], node_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
-            stmt.query_map(params![needle, limit + 1], node_from_row)?
+            stmt.query_map(params![query, limit + 1], node_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let truncated = nodes.len() > limit as usize;
@@ -1270,48 +2017,41 @@ impl Meshlet {
 
     fn query_edges(
         &self,
-        needle: &str,
+        query: &str,
         namespace: Option<&str>,
         limit: u32,
         profile: SafetyProfile,
     ) -> Result<Bounded<Value>> {
         let limit = clamp_limit(limit);
         let visibility = visibility_clause(profile);
-        let namespace_filter = namespace.map(namespace_json_fragment).transpose()?;
-        let sql = if namespace_filter.is_some() {
+        let sql = if namespace.is_some() {
             format!(
-                "SELECT id, from_id, to_id, kind, attrs_json, source_event_id, visibility
-             FROM graph_edges
-             WHERE {visibility}
-               AND (instr(lower(id), ?1) > 0
-                OR instr(lower(from_id), ?1) > 0
-                OR instr(lower(to_id), ?1) > 0
-                OR instr(lower(kind), ?1) > 0
-                OR instr(lower(attrs_json), ?1) > 0)
-               AND instr(attrs_json, ?2) > 0
-             ORDER BY id
-             LIMIT ?3"
+                "SELECT graph_edges.id, graph_edges.from_id, graph_edges.to_id, graph_edges.kind, graph_edges.attrs_json, graph_edges.source_event_id, graph_edges.visibility
+                 FROM graph_edges
+                 JOIN graph_edges_fts ON graph_edges.id = graph_edges_fts.id
+                 WHERE graph_edges_fts MATCH ?1
+                   AND graph_edges.{visibility}
+                   AND graph_edges_fts.namespace = ?2
+                 ORDER BY bm25(graph_edges_fts), graph_edges.id
+                 LIMIT ?3"
             )
         } else {
             format!(
-                "SELECT id, from_id, to_id, kind, attrs_json, source_event_id, visibility
-             FROM graph_edges
-             WHERE {visibility}
-               AND (instr(lower(id), ?1) > 0
-                OR instr(lower(from_id), ?1) > 0
-                OR instr(lower(to_id), ?1) > 0
-                OR instr(lower(kind), ?1) > 0
-                OR instr(lower(attrs_json), ?1) > 0)
-             ORDER BY id
-             LIMIT ?2"
+                "SELECT graph_edges.id, graph_edges.from_id, graph_edges.to_id, graph_edges.kind, graph_edges.attrs_json, graph_edges.source_event_id, graph_edges.visibility
+                 FROM graph_edges
+                 JOIN graph_edges_fts ON graph_edges.id = graph_edges_fts.id
+                 WHERE graph_edges_fts MATCH ?1
+                   AND graph_edges.{visibility}
+                 ORDER BY bm25(graph_edges_fts), graph_edges.id
+                 LIMIT ?2"
             )
         };
         let mut stmt = self.conn.prepare(&sql)?;
-        let mut edges = if let Some(filter) = namespace_filter {
-            stmt.query_map(params![needle, filter, limit + 1], edge_from_row)?
+        let mut edges = if let Some(namespace) = namespace {
+            stmt.query_map(params![query, namespace, limit + 1], edge_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
-            stmt.query_map(params![needle, limit + 1], edge_from_row)?
+            stmt.query_map(params![query, limit + 1], edge_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let truncated = edges.len() > limit as usize;
@@ -1322,9 +2062,12 @@ impl Meshlet {
         })
     }
 
-    fn task_views(&self) -> Result<Vec<Value>> {
+    fn task_views_from_events(&self, profile: SafetyProfile) -> Result<Vec<Value>> {
         let mut tasks: BTreeMap<String, serde_json::Map<String, Value>> = BTreeMap::new();
         for event in self.events_ascending()? {
+            if profile == SafetyProfile::PublicSafe && event.visibility != EventVisibility::Public {
+                continue;
+            }
             match event.event_type.as_str() {
                 "task.created" => {
                     let id = event
@@ -1339,7 +2082,7 @@ impl Meshlet {
                         .or_insert_with(|| json!(event.id.clone()));
                     task.entry("created_at")
                         .or_insert_with(|| json!(event.created_at.clone()));
-                    merge_task_payload(task, &event);
+                    merge_task_payload(task, &event, true);
                 }
                 "task.updated" => {
                     let Some(id) = event.payload.get("task_id").and_then(Value::as_str) else {
@@ -1347,12 +2090,23 @@ impl Meshlet {
                     };
                     let task = tasks.entry(id.to_string()).or_default();
                     task.entry("id").or_insert_with(|| json!(id));
-                    merge_task_payload(task, &event);
+                    merge_task_payload(task, &event, false);
                 }
                 _ => {}
             }
         }
-        Ok(tasks.into_values().map(Value::Object).collect())
+        let mut tasks = tasks.into_values().map(Value::Object).collect::<Vec<_>>();
+        tasks.sort_by(|a, b| {
+            b.get("updated_at")
+                .and_then(Value::as_str)
+                .cmp(&a.get("updated_at").and_then(Value::as_str))
+                .then_with(|| {
+                    a.get("id")
+                        .and_then(Value::as_str)
+                        .cmp(&b.get("id").and_then(Value::as_str))
+                })
+        });
+        Ok(tasks)
     }
 
     fn next_seq(&self) -> Result<i64> {
@@ -1398,6 +2152,17 @@ impl Meshlet {
             .query_map([], event_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(events)
+    }
+
+    fn event_records_ascending(&self) -> Result<Vec<EventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, id, type, created_at, actor, payload_json, visibility, hash, prev_hash
+             FROM events ORDER BY seq ASC",
+        )?;
+        let records = stmt
+            .query_map([], event_record_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
     }
 
     fn apply_event(&self, event: &Event) -> Result<()> {
@@ -1467,6 +2232,13 @@ impl Meshlet {
                 canonical_json(&event.payload)?,
             ],
         )?;
+        self.upsert_context_fts(
+            &format!("context:{}", event.id),
+            kind,
+            namespace,
+            title,
+            summary,
+        )?;
         Ok(())
     }
 
@@ -1495,6 +2267,7 @@ impl Meshlet {
                 event.visibility.as_str(),
             ],
         )?;
+        self.upsert_skill_fts(name, description)?;
         let skill_id = format!("skill:{name}");
         self.upsert_node(
             &skill_id,
@@ -1531,25 +2304,64 @@ impl Meshlet {
     }
 
     fn apply_agent_message(&self, event: &Event) -> Result<()> {
-        let agent = event
-            .payload
-            .get("agent")
-            .and_then(Value::as_str)
+        let from_agent = nonempty_string(&event.payload, "from")
+            .or_else(|| nonempty_string(&event.payload, "agent"))
             .unwrap_or(&event.actor);
-        let agent_id = format!("agent:{agent}");
+        let to_agent = nonempty_string(&event.payload, "to").unwrap_or("agent:unknown");
+        let summary = nonempty_string(&event.payload, "summary")
+            .or_else(|| nonempty_string(&event.payload, "label"))
+            .or_else(|| nonempty_string(&event.payload, "note"))
+            .unwrap_or("agent.message");
+        let task_id = nonempty_string(&event.payload, "task_id");
+        let body = event.payload.get("body").and_then(Value::as_str);
+        let reply_to = nonempty_string(&event.payload, "reply_to");
+        let agent_id = format!("agent:{from_agent}");
+        let to_agent_id = format!("agent:{to_agent}");
         let message_id = format!("message:{}", event.id);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO mailbox_messages(
+                id, from_agent, to_agent, task_id, summary, body, reply_to, visibility,
+                source_event_id, created_at, schema_version, attrs_json
+             )
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                message_id,
+                from_agent,
+                to_agent,
+                task_id,
+                summary,
+                body,
+                reply_to,
+                event.visibility.as_str(),
+                event.id,
+                event.created_at,
+                MESSAGE_SCHEMA_VERSION,
+                canonical_json(&attrs_with_visibility(
+                    event.payload.clone(),
+                    event.visibility
+                ))?,
+            ],
+        )?;
         self.upsert_node(
             &agent_id,
             "agent",
-            Some(agent),
-            json!({ "name": agent }),
+            Some(from_agent),
+            json!({ "name": from_agent }),
+            &event.id,
+            event.visibility,
+        )?;
+        self.upsert_node(
+            &to_agent_id,
+            "agent",
+            Some(to_agent),
+            json!({ "name": to_agent }),
             &event.id,
             event.visibility,
         )?;
         self.upsert_node(
             &message_id,
             "message",
-            event.payload.get("summary").and_then(Value::as_str),
+            Some(summary),
             attrs_with_visibility(event.payload.clone(), event.visibility),
             &event.id,
             event.visibility,
@@ -1563,6 +2375,26 @@ impl Meshlet {
             &event.id,
             event.visibility,
         )?;
+        self.upsert_edge(
+            &format!("edge:{}:message-to-agent", event.id),
+            &message_id,
+            &to_agent_id,
+            "references",
+            json!({ "field": "to" }),
+            &event.id,
+            event.visibility,
+        )?;
+        if let Some(task_id) = task_id {
+            self.upsert_edge(
+                &format!("edge:{}:message-task", event.id),
+                &message_id,
+                &format!("task:{task_id}"),
+                "references",
+                json!({ "field": "task_id" }),
+                &event.id,
+                event.visibility,
+            )?;
+        }
         Ok(())
     }
 
@@ -1621,10 +2453,88 @@ impl Meshlet {
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| event.id.clone());
+        let existing = self.task_row(&task_id)?;
+        let title = match event.event_type.as_str() {
+            "task.created" => required_nonempty_string(&event.payload, "title")?.to_string(),
+            _ => existing
+                .as_ref()
+                .and_then(|task| task.get("title").and_then(Value::as_str))
+                .or_else(|| nonempty_string(&event.payload, "title"))
+                .unwrap_or(&task_id)
+                .to_string(),
+        };
+        let status = nonempty_string(&event.payload, "status")
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|task| task.get("status").and_then(Value::as_str))
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| "open".to_string());
+        let assignee = nonempty_string(&event.payload, "assignee")
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|task| task.get("assignee").and_then(Value::as_str))
+                    .map(ToOwned::to_owned)
+            });
+        let note = event
+            .payload
+            .get("note")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|task| task.get("note").and_then(Value::as_str))
+                    .map(ToOwned::to_owned)
+            });
+        self.conn.execute(
+            "INSERT INTO tasks(
+                id, title, status, assignee, note, visibility, created_event_id,
+                updated_event_id, created_at, updated_at, schema_version, attrs_json
+             )
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                status = excluded.status,
+                assignee = excluded.assignee,
+                note = excluded.note,
+                visibility = excluded.visibility,
+                updated_event_id = excluded.updated_event_id,
+                updated_at = excluded.updated_at,
+                schema_version = excluded.schema_version,
+                attrs_json = excluded.attrs_json",
+            params![
+                task_id,
+                title,
+                status,
+                assignee,
+                note,
+                event.visibility.as_str(),
+                existing
+                    .as_ref()
+                    .and_then(|task| task.get("created_event_id").and_then(Value::as_str))
+                    .unwrap_or(&event.id),
+                event.id,
+                existing
+                    .as_ref()
+                    .and_then(|task| task.get("created_at").and_then(Value::as_str))
+                    .unwrap_or(&event.created_at),
+                event.created_at,
+                TASK_SCHEMA_VERSION,
+                canonical_json(&attrs_with_visibility(
+                    event.payload.clone(),
+                    event.visibility
+                ))?,
+            ],
+        )?;
         self.upsert_node(
             &format!("task:{task_id}"),
             "task",
-            event.payload.get("title").and_then(Value::as_str),
+            Some(&title),
             attrs_with_visibility(event.payload.clone(), event.visibility),
             &event.id,
             event.visibility,
@@ -1704,6 +2614,7 @@ impl Meshlet {
         source_event_id: &str,
         visibility: EventVisibility,
     ) -> Result<()> {
+        let namespace = graph_namespace(&attrs);
         self.conn.execute(
             "INSERT OR REPLACE INTO graph_nodes(id, kind, label, attrs_json, source_event_id, visibility)
              VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1716,6 +2627,7 @@ impl Meshlet {
                 visibility.as_str(),
             ],
         )?;
+        self.upsert_graph_node_fts(id, kind, namespace, label)?;
         Ok(())
     }
 
@@ -1729,6 +2641,8 @@ impl Meshlet {
         source_event_id: &str,
         visibility: EventVisibility,
     ) -> Result<()> {
+        let namespace = graph_namespace(&attrs);
+        let label = graph_edge_label(&attrs);
         self.conn.execute(
             "INSERT OR REPLACE INTO graph_edges(id, from_id, to_id, kind, attrs_json, source_event_id, visibility)
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1742,6 +2656,180 @@ impl Meshlet {
                 visibility.as_str(),
             ],
         )?;
+        self.upsert_graph_edge_fts(id, kind, namespace, label)?;
+        Ok(())
+    }
+
+    fn clear_fts(&self) -> Result<()> {
+        for table in [
+            "events_fts",
+            "contexts_fts",
+            "graph_nodes_fts",
+            "graph_edges_fts",
+            "skills_fts",
+        ] {
+            self.conn.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        Ok(())
+    }
+
+    fn rebuild_fts(&self) -> Result<()> {
+        self.clear_fts()?;
+        for event in self.events_ascending()? {
+            self.upsert_event_fts(&event)?;
+        }
+
+        let context_rows = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, kind, namespace, title, summary FROM contexts ORDER BY id")?;
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, kind, namespace, title, summary) in context_rows {
+            self.upsert_context_fts(&id, &kind, namespace.as_deref(), title.as_deref(), &summary)?;
+        }
+
+        let node_rows = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, kind, label, attrs_json FROM graph_nodes ORDER BY id")?;
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, kind, label, attrs_json) in node_rows {
+            let attrs = serde_json::from_str::<Value>(&attrs_json).unwrap_or_else(|_| json!({}));
+            self.upsert_graph_node_fts(&id, &kind, graph_namespace(&attrs), label.as_deref())?;
+        }
+
+        let edge_rows = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, kind, attrs_json FROM graph_edges ORDER BY id")?;
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, kind, attrs_json) in edge_rows {
+            let attrs = serde_json::from_str::<Value>(&attrs_json).unwrap_or_else(|_| json!({}));
+            self.upsert_graph_edge_fts(
+                &id,
+                &kind,
+                graph_namespace(&attrs),
+                graph_edge_label(&attrs),
+            )?;
+        }
+
+        let skill_rows = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT name, description FROM skills ORDER BY name")?;
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (name, description) in skill_rows {
+            self.upsert_skill_fts(&name, description.as_deref())?;
+        }
+        Ok(())
+    }
+
+    fn upsert_event_fts(&self, event: &Event) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM events_fts WHERE id = ?1", [event.id.as_str()])?;
+        self.conn.execute(
+            "INSERT INTO events_fts(id, type, actor, text) VALUES(?1, ?2, ?3, ?4)",
+            params![
+                event.id.as_str(),
+                event.event_type.as_str(),
+                event.actor.as_str(),
+                compact_event_text(event),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_context_fts(
+        &self,
+        id: &str,
+        kind: &str,
+        namespace: Option<&str>,
+        title: Option<&str>,
+        summary: &str,
+    ) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM contexts_fts WHERE id = ?1", [id])?;
+        self.conn.execute(
+            "INSERT INTO contexts_fts(id, kind, namespace, title, summary)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![id, kind, namespace, title, summary],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_graph_node_fts(
+        &self,
+        id: &str,
+        kind: &str,
+        namespace: Option<&str>,
+        label: Option<&str>,
+    ) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM graph_nodes_fts WHERE id = ?1", [id])?;
+        self.conn.execute(
+            "INSERT INTO graph_nodes_fts(id, kind, namespace, label)
+             VALUES(?1, ?2, ?3, ?4)",
+            params![id, kind, namespace, label],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_graph_edge_fts(
+        &self,
+        id: &str,
+        kind: &str,
+        namespace: Option<&str>,
+        label: Option<&str>,
+    ) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM graph_edges_fts WHERE id = ?1", [id])?;
+        self.conn.execute(
+            "INSERT INTO graph_edges_fts(id, kind, namespace, label)
+             VALUES(?1, ?2, ?3, ?4)",
+            params![id, kind, namespace, label],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_skill_fts(&self, name: &str, summary: Option<&str>) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM skills_fts WHERE name = ?1", [name])?;
+        self.conn.execute(
+            "INSERT INTO skills_fts(name, searchable_name, kind, summary)
+             VALUES(?1, ?2, 'skill', ?3)",
+            params![name, name, summary],
+        )?;
         Ok(())
     }
 
@@ -1749,6 +2837,17 @@ impl Meshlet {
         for event in self.events_ascending()? {
             if event.event_type == "context.added" {
                 self.apply_context_added(&event)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn backfill_mailbox_from_events(&self) -> Result<()> {
+        for event in self.events_ascending()? {
+            if matches!(event.event_type.as_str(), "task.created" | "task.updated") {
+                self.apply_task(&event)?;
+            } else if event.event_type == "agent.message" {
+                self.apply_agent_message(&event)?;
             }
         }
         Ok(())
@@ -1921,9 +3020,46 @@ fn validate_event_payload(event_type: &str, payload: &Value) -> Result<()> {
     match event_type {
         "task.created" => {
             required_nonempty_string(payload, "title")?;
+            if payload.get("task_id").is_some() {
+                required_nonempty_string(payload, "task_id")?;
+            }
+            let status = nonempty_string(payload, "status").unwrap_or("open");
+            if !valid_task_status(status) {
+                bail!("task status must be open, in_progress, blocked, done, or canceled");
+            }
+            if payload.get("assignee").is_some() {
+                required_nonempty_string(payload, "assignee")?;
+            }
         }
         "task.updated" => {
             required_nonempty_string(payload, "task_id")?;
+            if !["status", "assignee", "note"]
+                .iter()
+                .any(|key| payload.get(*key).is_some())
+            {
+                bail!("task.updated requires status, assignee, or note");
+            }
+            if let Some(status) = nonempty_string(payload, "status") {
+                if !valid_task_status(status) {
+                    bail!("task status must be open, in_progress, blocked, done, or canceled");
+                }
+            } else if payload.get("status").is_some() {
+                required_nonempty_string(payload, "status")?;
+            }
+            if payload.get("assignee").is_some() {
+                required_nonempty_string(payload, "assignee")?;
+            }
+        }
+        "agent.message" => {
+            required_nonempty_string(payload, "from")?;
+            required_nonempty_string(payload, "to")?;
+            required_nonempty_string(payload, "summary")?;
+            if payload.get("task_id").is_some() {
+                required_nonempty_string(payload, "task_id")?;
+            }
+            if payload.get("reply_to").is_some() {
+                required_nonempty_string(payload, "reply_to")?;
+            }
         }
         "evidence.attached" => {
             if nonempty_string(payload, "path").is_none()
@@ -2017,14 +3153,82 @@ fn nonempty_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.trim().is_empty())
 }
 
-fn merge_task_payload(task: &mut serde_json::Map<String, Value>, event: &Event) {
-    for key in ["title", "status", "note"] {
+fn merge_task_payload(task: &mut serde_json::Map<String, Value>, event: &Event, created: bool) {
+    if created && event.payload.get("status").is_none() {
+        task.insert("status".to_string(), json!("open"));
+    }
+    for key in ["title", "status", "assignee", "note"] {
         if let Some(value) = event.payload.get(key) {
             task.insert(key.to_string(), value.clone());
         }
     }
+    task.entry("title")
+        .or_insert_with(|| json!(event_task_id(event).unwrap_or_else(|| event.id.clone())));
+    task.entry("status").or_insert_with(|| json!("open"));
+    task.insert("visibility".to_string(), json!(event.visibility.as_str()));
+    task.insert("schema_version".to_string(), json!(TASK_SCHEMA_VERSION));
     task.insert("updated_event_id".to_string(), json!(event.id));
     task.insert("updated_at".to_string(), json!(event.created_at));
+}
+
+fn valid_task_status(status: &str) -> bool {
+    TASK_STATUSES.contains(&status)
+}
+
+fn validate_task_transition(current: &str, next: &str) -> Result<()> {
+    if current == next {
+        return Ok(());
+    }
+    let allowed = match current {
+        "open" => matches!(next, "in_progress" | "blocked" | "canceled"),
+        "in_progress" => matches!(next, "blocked" | "done" | "canceled"),
+        "blocked" => matches!(next, "in_progress" | "canceled"),
+        "done" | "canceled" => false,
+        _ => false,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        bail!("invalid task status transition: {current} -> {next}");
+    }
+}
+
+fn event_task_id(event: &Event) -> Option<String> {
+    match event.event_type.as_str() {
+        "task.created" => event
+            .payload
+            .get("task_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| Some(event.id.clone())),
+        "task.updated" | "agent.message" | "evidence.attached" => event
+            .payload
+            .get("task_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        _ => None,
+    }
+}
+
+fn compact_timeline_event(seq: i64, event: &Event) -> Value {
+    let mut payload = serde_json::Map::new();
+    for key in [
+        "task_id", "title", "status", "assignee", "note", "from", "to", "summary", "reply_to",
+        "path", "ref",
+    ] {
+        if let Some(value) = event.payload.get(key) {
+            payload.insert(key.to_string(), value.clone());
+        }
+    }
+    json!({
+        "seq": seq,
+        "id": event.id,
+        "type": event.event_type,
+        "created_at": event.created_at,
+        "actor": event.actor,
+        "visibility": event.visibility.as_str(),
+        "payload": payload,
+    })
 }
 
 fn attrs_with_visibility(attrs: Value, visibility: EventVisibility) -> Value {
@@ -2038,6 +3242,38 @@ fn attrs_with_visibility(attrs: Value, visibility: EventVisibility) -> Value {
             "visibility": visibility.as_str(),
         }),
     }
+}
+
+fn fts_query(input: &str) -> Result<String> {
+    let terms = input
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{term}\""))
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        bail!("query has no searchable terms");
+    }
+    Ok(terms.join(" "))
+}
+
+fn compact_event_text(event: &Event) -> String {
+    [
+        "label", "title", "summary", "status", "name", "assignee", "from", "to",
+    ]
+    .into_iter()
+    .filter_map(|key| nonempty_string(&event.payload, key))
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+fn graph_namespace(attrs: &Value) -> Option<&str> {
+    attrs.get("namespace").and_then(Value::as_str)
+}
+
+fn graph_edge_label(attrs: &Value) -> Option<&str> {
+    ["label", "relation", "field", "title", "summary", "note"]
+        .into_iter()
+        .find_map(|key| attrs.get(key).and_then(Value::as_str))
 }
 
 fn visibility_clause(profile: SafetyProfile) -> &'static str {
@@ -2118,6 +3354,20 @@ fn compact_edge(edge: Value) -> Value {
     })
 }
 
+fn compact_message(message: Value) -> Value {
+    json!({
+        "id": message.get("id").cloned().unwrap_or(Value::Null),
+        "from": message.get("from").cloned().unwrap_or(Value::Null),
+        "to": message.get("to").cloned().unwrap_or(Value::Null),
+        "task_id": message.get("task_id").cloned().unwrap_or(Value::Null),
+        "summary": message.get("summary").cloned().unwrap_or(Value::Null),
+        "reply_to": message.get("reply_to").cloned().unwrap_or(Value::Null),
+        "visibility": message.get("visibility").cloned().unwrap_or(Value::Null),
+        "source_event_id": message.get("source_event_id").cloned().unwrap_or(Value::Null),
+        "created_at": message.get("created_at").cloned().unwrap_or(Value::Null),
+    })
+}
+
 fn compact_query(mut value: Value, profile: SafetyProfile) -> Value {
     for key in ["events", "nodes", "edges"] {
         let Some(section) = value.get_mut(key).and_then(Value::as_object_mut) else {
@@ -2169,6 +3419,205 @@ fn filter_public_values(values: Vec<Value>, profile: SafetyProfile) -> Vec<Value
     values.into_iter().filter(value_is_public).collect()
 }
 
+fn prepare_okf_output_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        if !path.is_dir() {
+            bail!("OKF output path must be a directory");
+        }
+        if fs::read_dir(path)?.next().transpose()?.is_some() {
+            bail!("OKF output directory must be empty");
+        }
+    } else {
+        fs::create_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn okf_index(documents: &[OkfDocument]) -> String {
+    let mut text = String::from(
+        "---\nokf_version: \"0.1\"\ntype: \"Meshlet OKF Bundle\"\ntitle: \"Meshlet Public Export\"\n---\n# Meshlet Public Export\n\n",
+    );
+    for doc in documents {
+        text.push_str(&format!(
+            "- [{}]({}) - {}\n",
+            doc.title, doc.relative_path, doc.item_type
+        ));
+    }
+    text
+}
+
+fn okf_log(events: &[Event]) -> String {
+    let mut text = String::from("# Meshlet Public Event Log\n\n");
+    for event in events {
+        text.push_str(&format!(
+            "- {} `{}` by `{}` (`{}`)\n",
+            event.created_at, event.event_type, event.actor, event.id
+        ));
+    }
+    text
+}
+
+fn okf_document_text(doc: &OkfDocument, relations: &str) -> String {
+    let mut text = format!(
+        "---\ntype: {}\ntitle: {}\ndescription: {}\nresource: {}\ntags:\n{}\ntimestamp: {}\nmeshlet_id: {}\nmeshlet_event_id: {}\nsource_event_id: {}\nvisibility: {}\n---\n# {}\n\n{}",
+        yaml_string(&doc.item_type),
+        yaml_string(&doc.title),
+        yaml_string(&doc.description),
+        yaml_string(&doc.resource),
+        doc.tags
+            .iter()
+            .map(|tag| format!("  - {}\n", yaml_string(tag)))
+            .collect::<String>(),
+        yaml_string(&doc.timestamp),
+        yaml_string(&doc.id),
+        yaml_string(&doc.source_event_id),
+        yaml_string(&doc.source_event_id),
+        yaml_string(&doc.visibility),
+        doc.title,
+        doc.body,
+    );
+    if !relations.is_empty() {
+        text.push_str("\n## Relations\n");
+        text.push_str(relations);
+    }
+    text
+}
+
+fn okf_relation_lines(
+    id: &str,
+    edges: &[Value],
+    path_by_id: &BTreeMap<String, String>,
+    relative_path: &str,
+) -> String {
+    let mut lines = Vec::new();
+    for edge in edges {
+        let kind = string_value(edge, "kind").unwrap_or("references");
+        if string_value(edge, "from_id") == Some(id) {
+            if let Some(to_id) = string_value(edge, "to_id")
+                && let Some(path) = path_by_id.get(to_id)
+            {
+                lines.push(format!(
+                    "- `{kind}` [{}]({})\n",
+                    to_id,
+                    relative_link(relative_path, path)
+                ));
+            }
+        } else if string_value(edge, "to_id") == Some(id) {
+            if let Some(from_id) = string_value(edge, "from_id")
+                && let Some(path) = path_by_id.get(from_id)
+            {
+                lines.push(format!(
+                    "- [{}]({}) `{kind}` this\n",
+                    from_id,
+                    relative_link(relative_path, path)
+                ));
+            }
+        }
+    }
+    lines.concat()
+}
+
+fn relative_link(from_file: &str, to_file: &str) -> String {
+    let from_depth = from_file.matches('/').count();
+    let mut link = String::new();
+    for _ in 0..from_depth {
+        link.push_str("../");
+    }
+    link.push_str(to_file);
+    link
+}
+
+fn metadata_line(label: &str, value: Option<&str>) -> String {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("- {label}: `{value}`\n"))
+        .unwrap_or_default()
+}
+
+fn string_value<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+fn yaml_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn okf_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "item".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
+fn collect_markdown_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_markdown_files(&path, files)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn okf_frontmatter_type(text: &str) -> Option<String> {
+    let rest = text.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    for line in rest[..end].lines() {
+        let Some(value) = line.trim().strip_prefix("type:") else {
+            continue;
+        };
+        return Some(
+            value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string(),
+        );
+    }
+    Some(String::new())
+}
+
+fn markdown_links(text: &str) -> Vec<String> {
+    let mut links = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("](") {
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find(')') else {
+            break;
+        };
+        links.push(after_start[..end].trim().to_string());
+        rest = &after_start[end + 1..];
+    }
+    links
+}
+
+fn link_is_external_or_anchor(link: &str) -> bool {
+    link.starts_with('#') || link.contains("://") || link.starts_with("mailto:")
+}
+
 fn value_is_public(value: &Value) -> bool {
     value
         .get("visibility")
@@ -2187,13 +3636,6 @@ fn graph_import_edge_kind(relation: &str) -> &str {
         | "updates" => relation,
         _ => "references",
     }
-}
-
-fn namespace_json_fragment(namespace: &str) -> Result<String> {
-    Ok(format!(
-        "\"namespace\":{}",
-        serde_json::to_string(namespace)?
-    ))
 }
 
 fn clamp_limit(limit: u32) -> u32 {
@@ -2309,6 +3751,48 @@ fn skill_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "description": row.get::<_, Option<String>>(5)?,
         "source_event_id": row.get::<_, String>(6)?,
         "visibility": row.get::<_, String>(7)?,
+    }))
+}
+
+fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let attrs_json: Option<String> = row.get(11)?;
+    Ok(json!({
+        "id": row.get::<_, String>(0)?,
+        "title": row.get::<_, String>(1)?,
+        "status": row.get::<_, String>(2)?,
+        "assignee": row.get::<_, Option<String>>(3)?,
+        "note": row.get::<_, Option<String>>(4)?,
+        "visibility": row.get::<_, String>(5)?,
+        "created_event_id": row.get::<_, String>(6)?,
+        "updated_event_id": row.get::<_, String>(7)?,
+        "created_at": row.get::<_, String>(8)?,
+        "updated_at": row.get::<_, String>(9)?,
+        "schema_version": row.get::<_, i64>(10)?,
+        "attrs": attrs_json
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .unwrap_or_else(|| json!({})),
+    }))
+}
+
+fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let attrs_json: Option<String> = row.get(11)?;
+    Ok(json!({
+        "id": row.get::<_, String>(0)?,
+        "from": row.get::<_, String>(1)?,
+        "to": row.get::<_, String>(2)?,
+        "task_id": row.get::<_, Option<String>>(3)?,
+        "summary": row.get::<_, String>(4)?,
+        "body": row.get::<_, Option<String>>(5)?,
+        "reply_to": row.get::<_, Option<String>>(6)?,
+        "visibility": row.get::<_, String>(7)?,
+        "source_event_id": row.get::<_, String>(8)?,
+        "created_at": row.get::<_, String>(9)?,
+        "schema_version": row.get::<_, i64>(10)?,
+        "attrs": attrs_json
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .unwrap_or_else(|| json!({})),
     }))
 }
 
@@ -2570,6 +4054,341 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["summary"], "needle public");
         assert_eq!(items[0]["visibility"], "public");
+        Ok(())
+    }
+
+    #[test]
+    fn contexts_fts_finds_context_by_title_or_summary() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({
+                "kind": "decision",
+                "title": "FTS title needle",
+                "summary": "compact summary target"
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let by_title = meshlet.search_contexts("title needle", 10, SafetyProfile::PublicSafe)?;
+        let by_summary =
+            meshlet.search_contexts("summary target", 10, SafetyProfile::PublicSafe)?;
+
+        assert_eq!(
+            by_title["contexts"]["items"][0]["title"],
+            "FTS title needle"
+        );
+        assert_eq!(
+            by_summary["contexts"]["items"][0]["summary"],
+            "compact summary target"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn graph_nodes_fts_finds_node_by_label() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "node-a", "label": "FTS node needle"}],
+                "links": []
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let result =
+            meshlet.query_scoped("node needle", Some("nodes"), Some("graphify:repo"), 10)?;
+        let items = result["nodes"]["items"].as_array().expect("nodes");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "graphify:repo:node-a");
+        Ok(())
+    }
+
+    #[test]
+    fn graph_edges_fts_finds_edge_by_label_or_kind() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "links": [{
+                    "source": "a",
+                    "target": "b",
+                    "relation": "depends_on",
+                    "label": "FTS edge needle"
+                }]
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let by_label =
+            meshlet.query_scoped("edge needle", Some("edges"), Some("graphify:repo"), 10)?;
+        let by_kind =
+            meshlet.query_scoped("depends on", Some("edges"), Some("graphify:repo"), 10)?;
+
+        assert_eq!(
+            by_label["edges"]["items"][0]["id"],
+            by_kind["edges"]["items"][0]["id"]
+        );
+        assert_eq!(by_kind["edges"]["items"][0]["kind"], "depends_on");
+        Ok(())
+    }
+
+    #[test]
+    fn skills_fts_finds_skill_by_name_or_summary() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "skill.added",
+            "agent:test",
+            json!({
+                "name": "fts-skill-needle",
+                "version": "0.1.0",
+                "kind": "skill",
+                "manifest_path": "skill.toml",
+                "entry": "./SKILL.md",
+                "permissions": ["read_repo"],
+                "description": "compact skill summary target"
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let by_name = meshlet.search_skills("skill needle", 10, SafetyProfile::PublicSafe)?;
+        let by_summary = meshlet.search_skills("summary target", 10, SafetyProfile::PublicSafe)?;
+
+        assert_eq!(by_name["skills"]["items"][0]["name"], "fts-skill-needle");
+        assert_eq!(by_summary["skills"]["items"][0]["name"], "fts-skill-needle");
+        Ok(())
+    }
+
+    #[test]
+    fn events_fts_finds_event_by_compact_text() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "compact event needle", "body": "not indexed"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let result = meshlet.query_scoped_view(
+            "event needle",
+            Some("events"),
+            None,
+            10,
+            OutputMode::Compact,
+            SafetyProfile::PublicSafe,
+        )?;
+        let items = result["events"]["items"].as_array().expect("events");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["label"], "compact event needle");
+        Ok(())
+    }
+
+    #[test]
+    fn fts_public_safe_filters_visibility_before_limit() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "needle public"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        for index in 0..12 {
+            let visibility = if index % 2 == 0 {
+                EventVisibility::Private
+            } else {
+                EventVisibility::Local
+            };
+            meshlet.append_event_with_options(
+                "context.added",
+                "agent:test",
+                json!({"label": format!("needle needle needle hidden {index}")}),
+                visibility,
+                SafetyProfile::LocalTrusted,
+            )?;
+        }
+
+        let result = meshlet.search_contexts("needle", 1, SafetyProfile::PublicSafe)?;
+        let items = result["contexts"]["items"].as_array().expect("contexts");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["summary"], "needle public");
+        assert_eq!(items[0]["visibility"], "public");
+        Ok(())
+    }
+
+    #[test]
+    fn rebuild_read_models_rebuilds_fts_deterministically() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "context.added",
+            "agent:test",
+            json!({"label": "deterministic context needle"}),
+        )?;
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "a", "label": "deterministic node needle"}],
+                "links": []
+            }),
+        )?;
+        meshlet.append_event(
+            "skill.added",
+            "agent:test",
+            skill_payload("deterministic-skill"),
+        )?;
+
+        let before_contexts =
+            meshlet.search_contexts("deterministic", 20, SafetyProfile::LocalTrusted)?;
+        let before_nodes = meshlet.query_scoped("deterministic", Some("nodes"), None, 20)?;
+        let before_skills =
+            meshlet.search_skills("deterministic", 20, SafetyProfile::LocalTrusted)?;
+
+        meshlet.clear_fts()?;
+        meshlet.conn.execute("DELETE FROM contexts", [])?;
+        meshlet.conn.execute("DELETE FROM graph_nodes", [])?;
+        meshlet.conn.execute("DELETE FROM graph_edges", [])?;
+        meshlet.conn.execute("DELETE FROM skills", [])?;
+        meshlet.rebuild_graph()?;
+
+        assert_eq!(
+            before_contexts,
+            meshlet.search_contexts("deterministic", 20, SafetyProfile::LocalTrusted)?
+        );
+        assert_eq!(
+            before_nodes,
+            meshlet.query_scoped("deterministic", Some("nodes"), None, 20)?
+        );
+        assert_eq!(
+            before_skills,
+            meshlet.search_skills("deterministic", 20, SafetyProfile::LocalTrusted)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn migration_from_v4_creates_and_backfills_fts() -> Result<()> {
+        let dir = tempdir()?;
+        let db_dir = dir.path().join(DB_DIR);
+        fs::create_dir_all(&db_dir)?;
+        let conn = Connection::open(db_dir.join(DB_FILE))?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                id TEXT PRIMARY KEY,
+                seq INTEGER NOT NULL UNIQUE,
+                type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private',
+                hash TEXT NOT NULL UNIQUE,
+                prev_hash TEXT
+            );
+            CREATE TABLE graph_nodes (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                label TEXT,
+                attrs_json TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private'
+            );
+            CREATE TABLE graph_edges (
+                id TEXT PRIMARY KEY,
+                from_id TEXT NOT NULL,
+                to_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                attrs_json TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private'
+            );
+            CREATE TABLE skills (
+                name TEXT PRIMARY KEY,
+                version TEXT NOT NULL,
+                manifest_path TEXT NOT NULL,
+                entry TEXT NOT NULL,
+                permissions_json TEXT NOT NULL,
+                description TEXT,
+                source_event_id TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'private'
+            );
+            CREATE TABLE contexts (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                namespace TEXT,
+                title TEXT,
+                summary TEXT NOT NULL,
+                visibility TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                attrs_json TEXT
+            );
+            INSERT INTO meta(key, value) VALUES('schema_version', '4');
+            INSERT INTO events(id, seq, type, created_at, actor, payload_json, visibility, hash, prev_hash)
+                VALUES('event-v4', 1, 'context.added', '2026-06-28T00:00:00.000Z', 'agent:test', '{"label":"legacy event needle"}', 'public', 'hash-v4', NULL);
+            INSERT INTO contexts(id, kind, namespace, title, summary, visibility, source_event_id, created_at, updated_at, schema_version, attrs_json)
+                VALUES('context:event-v4', 'decision', 'graphify:v4', 'legacy context title', 'legacy context needle', 'public', 'event-v4', '2026-06-28T00:00:00.000Z', '2026-06-28T00:00:00.000Z', 1, '{}');
+            INSERT INTO graph_nodes(id, kind, label, attrs_json, source_event_id, visibility)
+                VALUES('graphify:v4:node-a', 'imported', 'legacy node needle', '{"namespace":"graphify:v4"}', 'event-v4', 'public');
+            INSERT INTO graph_edges(id, from_id, to_id, kind, attrs_json, source_event_id, visibility)
+                VALUES('edge-v4', 'graphify:v4:node-a', 'graphify:v4:node-b', 'references', '{"namespace":"graphify:v4","label":"legacy edge needle"}', 'event-v4', 'public');
+            INSERT INTO skills(name, version, manifest_path, entry, permissions_json, description, source_event_id, visibility)
+                VALUES('legacy-skill-needle', '0.1.0', 'skill.toml', './SKILL.md', '[]', 'legacy skill summary', 'event-v4', 'public');
+            "#,
+        )?;
+        drop(conn);
+
+        let meshlet = Meshlet::open(dir.path())?;
+        let contexts = meshlet.search_contexts("context needle", 10, SafetyProfile::PublicSafe)?;
+        let events = meshlet.query_scoped_view(
+            "event needle",
+            Some("events"),
+            None,
+            10,
+            OutputMode::Compact,
+            SafetyProfile::PublicSafe,
+        )?;
+        let nodes = meshlet.query_scoped("node needle", Some("nodes"), Some("graphify:v4"), 10)?;
+        let edges = meshlet.query_scoped("edge needle", Some("edges"), Some("graphify:v4"), 10)?;
+        let skills = meshlet.search_skills("skill summary", 10, SafetyProfile::PublicSafe)?;
+
+        assert_eq!(contexts["contexts"]["items"][0]["id"], "context:event-v4");
+        assert_eq!(events["events"]["items"][0]["id"], "event-v4");
+        assert_eq!(nodes["nodes"]["items"][0]["id"], "graphify:v4:node-a");
+        assert_eq!(edges["edges"]["items"][0]["id"], "edge-v4");
+        assert_eq!(skills["skills"]["items"][0]["name"], "legacy-skill-needle");
         Ok(())
     }
 
@@ -3021,14 +4840,194 @@ mod tests {
             EventVisibility::Public,
             SafetyProfile::PublicSafe,
         )?;
+        meshlet.create_task(
+            Some("public-task"),
+            "Public Task",
+            None,
+            Some("agent:b"),
+            None,
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.send_agent_message(
+            "agent:a",
+            "agent:b",
+            "Public handoff",
+            Some("public-task"),
+            Some("public body omitted"),
+            None,
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.send_agent_message(
+            "agent:a",
+            "agent:b",
+            "Private handoff",
+            Some("public-task"),
+            Some("private body omitted"),
+            None,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
 
         let export = meshlet.public_export(20)?;
         let events = export["events"].as_array().expect("events");
+        let export_text = export.to_string();
 
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["visibility"], "public");
-        assert!(events[0].get("payload").is_none());
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().all(|event| event["visibility"] == "public"));
+        assert!(events.iter().all(|event| event.get("payload").is_none()));
+        assert_eq!(export["tasks"][0]["id"], "public-task");
+        assert_eq!(
+            export["mailbox"]["messages"]["items"][0]["summary"],
+            "Public handoff"
+        );
+        assert!(
+            export["mailbox"]["messages"]["items"][0]
+                .get("body")
+                .is_none()
+        );
+        assert!(
+            export["timelines"][0]["items"]
+                .as_array()
+                .expect("timeline")
+                .iter()
+                .all(|item| item["visibility"] == "public")
+        );
+        assert!(!export_text.contains("public body omitted"));
+        assert!(!export_text.contains("Private handoff"));
+        assert!(!export_text.contains("private body omitted"));
         Ok(())
+    }
+
+    #[test]
+    fn public_okf_export_writes_public_markdown_bundle() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"title": "Private Context", "summary": "private note"}),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"title": "Public Context", "summary": "public note"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.append_event_with_options(
+            "skill.added",
+            "agent:test",
+            skill_payload("public-skill"),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.create_task(
+            Some("item-1"),
+            "Public Task",
+            None,
+            None,
+            None,
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.send_agent_message(
+            "agent:a",
+            "agent:b",
+            "Public OKF handoff",
+            Some("item-1"),
+            Some("public OKF body omitted"),
+            None,
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.send_agent_message(
+            "agent:a",
+            "agent:b",
+            "Private OKF handoff",
+            Some("item-1"),
+            Some("private OKF body omitted"),
+            None,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.append_event_with_options(
+            "evidence.attached",
+            "agent:test",
+            json!({"path": "src/lib.rs", "sha256": "0".repeat(64), "task_id": "item-1"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        let out = dir.path().join("okf");
+
+        let export = meshlet.public_export_okf(&out, 20)?;
+        let doctor = Meshlet::okf_doctor(&out)?;
+        let bundle = read_dir_text(&out)?;
+
+        assert_eq!(export["format"], "meshlet-okf-public-export-v1");
+        assert_eq!(doctor["ok"], true);
+        assert!(out.join("index.md").exists());
+        assert!(out.join("log.md").exists());
+        assert!(bundle.contains(r#"type: "Meshlet Context""#));
+        assert!(bundle.contains(r#"type: "Meshlet Task""#));
+        assert!(bundle.contains(r#"type: "Meshlet Message""#));
+        assert!(bundle.contains(r#"type: "Meshlet Skill""#));
+        assert!(bundle.contains(r#"type: "Meshlet Evidence""#));
+        assert!(bundle.contains("# Citations"));
+        assert!(bundle.contains("## Timeline"));
+        assert!(bundle.contains("Public OKF handoff"));
+        assert!(bundle.contains("public note"));
+        assert!(!bundle.contains("public OKF body omitted"));
+        assert!(!bundle.contains("Private OKF handoff"));
+        assert!(!bundle.contains("private OKF body omitted"));
+        assert!(!bundle.contains("private note"));
+        Ok(())
+    }
+
+    #[test]
+    fn okf_doctor_reports_malformed_docs_and_broken_links() -> Result<()> {
+        let dir = tempdir()?;
+        let contexts = dir.path().join("contexts");
+        fs::create_dir_all(&contexts)?;
+        fs::write(contexts.join("bad.md"), "# Missing frontmatter\n")?;
+        fs::write(
+            contexts.join("link.md"),
+            "---\ntype: Meshlet Context\n---\n# Link\n[missing](missing.md)\n",
+        )?;
+
+        let report = Meshlet::okf_doctor(dir.path())?;
+
+        assert_eq!(report["ok"], false);
+        assert!(
+            report["errors"][0]
+                .as_str()
+                .expect("error")
+                .contains("bad.md")
+        );
+        assert!(
+            report["warnings"][0]
+                .as_str()
+                .expect("warning")
+                .contains("missing.md")
+        );
+        Ok(())
+    }
+
+    fn read_dir_text(path: &Path) -> Result<String> {
+        let mut text = String::new();
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                text.push_str(&read_dir_text(&path)?);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+                text.push_str(&fs::read_to_string(path)?);
+            }
+        }
+        Ok(text)
     }
 
     #[test]
@@ -3238,6 +5237,11 @@ permissions = ["read_repo"]
         meshlet.append_event(
             "task.updated",
             "agent:test",
+            json!({"task_id": "task-1", "status": "in_progress"}),
+        )?;
+        meshlet.append_event(
+            "task.updated",
+            "agent:test",
             json!({"task_id": "task-1", "status": "done", "note": "verified"}),
         )?;
         let evidence = meshlet.append_event(
@@ -3289,6 +5293,178 @@ permissions = ["read_repo"]
                 .is_err()
         );
         assert_eq!(meshlet.event_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_task_reads_replay_public_events_only() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "task.created",
+            "agent:test",
+            json!({"task_id": "public-task", "title": "Public task"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.append_event_with_options(
+            "task.updated",
+            "agent:test",
+            json!({"task_id": "public-task", "status": "blocked", "note": "hidden"}),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.append_event_with_options(
+            "task.created",
+            "agent:test",
+            json!({"task_id": "private-task", "title": "Private task"}),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+
+        let public_tasks = meshlet.list_tasks_scoped(20, SafetyProfile::PublicSafe)?;
+        let public_task = meshlet.show_task_scoped("public-task", SafetyProfile::PublicSafe)?;
+
+        assert_eq!(public_tasks.len(), 1);
+        assert_eq!(public_task["status"], "open");
+        assert!(public_task.get("note").is_none_or(Value::is_null));
+        assert!(
+            meshlet
+                .show_task_scoped("private-task", SafetyProfile::PublicSafe)
+                .is_err()
+        );
+        assert_eq!(meshlet.show_task("public-task")?["status"], "blocked");
+        Ok(())
+    }
+
+    #[test]
+    fn task_state_machine_rejects_invalid_transition() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.create_task(
+            Some("state-task"),
+            "State task",
+            None,
+            None,
+            None,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+
+        assert!(
+            meshlet
+                .update_task(
+                    "state-task",
+                    Some("done"),
+                    None,
+                    None,
+                    EventVisibility::Private,
+                    SafetyProfile::LocalTrusted,
+                )
+                .is_err()
+        );
+        meshlet.update_task(
+            "state-task",
+            Some("in_progress"),
+            None,
+            None,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.update_task(
+            "state-task",
+            Some("done"),
+            None,
+            None,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        assert!(
+            meshlet
+                .update_task(
+                    "state-task",
+                    Some("in_progress"),
+                    None,
+                    None,
+                    EventVisibility::Private,
+                    SafetyProfile::LocalTrusted,
+                )
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mailbox_views_track_inbox_outbox_and_task_timeline() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.create_task(
+            Some("mail-task"),
+            "Mail task",
+            None,
+            Some("agent:b"),
+            None,
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.send_agent_message(
+            "agent:a",
+            "agent:b",
+            "Please handle this",
+            Some("mail-task"),
+            Some("body"),
+            None,
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let inbox = meshlet.list_mailbox("agent:b", "inbox", 20, SafetyProfile::PublicSafe)?;
+        let outbox = meshlet.list_mailbox("agent:a", "outbox", 20, SafetyProfile::PublicSafe)?;
+        let timeline = meshlet.task_timeline("mail-task", 20, SafetyProfile::PublicSafe)?;
+
+        assert_eq!(inbox["messages"]["items"][0]["from"], "agent:a");
+        assert_eq!(outbox["messages"]["items"][0]["to"], "agent:b");
+        assert_eq!(timeline["items"].as_array().expect("timeline").len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_timeline_excludes_hidden_events() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.create_task(
+            Some("timeline-task"),
+            "Timeline task",
+            None,
+            None,
+            None,
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.send_agent_message(
+            "agent:a",
+            "agent:b",
+            "Hidden note",
+            Some("timeline-task"),
+            None,
+            None,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.append_event_with_options(
+            "evidence.attached",
+            "agent:test",
+            json!({"path": "src/lib.rs", "task_id": "timeline-task"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let timeline = meshlet.task_timeline("timeline-task", 20, SafetyProfile::PublicSafe)?;
+        let items = timeline["items"].as_array().expect("timeline");
+
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item["visibility"] == "public"));
+        assert!(items.iter().all(|item| item["type"] != "agent.message"));
         Ok(())
     }
 
@@ -3585,6 +5761,11 @@ permissions = ["read_repo"]
         assert!(names.contains(&"meshlet_list_skills"));
         assert!(names.contains(&"meshlet_list_tasks"));
         assert!(names.contains(&"meshlet_get_task"));
+        assert!(names.contains(&"meshlet_create_task"));
+        assert!(names.contains(&"meshlet_update_task"));
+        assert!(names.contains(&"meshlet_send_message"));
+        assert!(names.contains(&"meshlet_get_mailbox"));
+        assert!(names.contains(&"meshlet_get_timeline"));
         assert!(names.contains(&"meshlet_query"));
         assert!(names.contains(&"meshlet_get_context"));
         Ok(())
@@ -3786,6 +5967,124 @@ description = "Review Rust code through resources."
         );
         let value: Value = serde_json::from_str(mcp_resource_text(&resource))?;
         assert_eq!(value["tasks"][0]["id"], "mcp-task");
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_v4_tools_create_message_and_timeline() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let create = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({
+                "name": "meshlet_create_task",
+                "arguments": {
+                    "task_id": "mcp-v4",
+                    "title": "MCP v4",
+                    "visibility": "public"
+                }
+            }),
+        );
+        let created: Event = serde_json::from_str(mcp_content_text(&create))?;
+        assert_eq!(created.event_type, "task.created");
+
+        let message = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({
+                "name": "meshlet_send_message",
+                "arguments": {
+                    "from": "agent:a",
+                    "to": "agent:b",
+                    "summary": "Handle MCP task",
+                    "task_id": "mcp-v4",
+                    "visibility": "public"
+                }
+            }),
+        );
+        let sent: Event = serde_json::from_str(mcp_content_text(&message))?;
+        assert_eq!(sent.event_type, "agent.message");
+
+        let mailbox = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({
+                "name": "meshlet_get_mailbox",
+                "arguments": { "agent": "agent:b", "direction": "inbox" }
+            }),
+        );
+        let mailbox_value: Value = serde_json::from_str(mcp_content_text(&mailbox))?;
+        assert_eq!(
+            mailbox_value["messages"]["items"][0]["summary"],
+            "Handle MCP task"
+        );
+
+        let timeline = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({
+                "name": "meshlet_get_timeline",
+                "arguments": { "task_id": "mcp-v4" }
+            }),
+        );
+        let timeline_value: Value = serde_json::from_str(mcp_content_text(&timeline))?;
+        assert_eq!(timeline_value["items"].as_array().expect("items").len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_public_safe_task_reads_exclude_private_tasks() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.create_task(
+            Some("visible-task"),
+            "Visible",
+            None,
+            None,
+            None,
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.create_task(
+            Some("hidden-task"),
+            "Hidden",
+            None,
+            None,
+            None,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        let list = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meshlet_list_tasks",
+                "arguments": { "limit": 20 }
+            }
+        });
+        let digest = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "meshlet_get_digest",
+                "arguments": { "limit": 20 }
+            }
+        });
+
+        let list_response =
+            handle_mcp_request_with_profile(&meshlet, &list, json!(1), SafetyProfile::PublicSafe);
+        let listed: Value = serde_json::from_str(mcp_content_text(&list_response))?;
+        let digest_response =
+            handle_mcp_request_with_profile(&meshlet, &digest, json!(2), SafetyProfile::PublicSafe);
+        let digested: Value = serde_json::from_str(mcp_content_text(&digest_response))?;
+
+        assert_eq!(listed["tasks"].as_array().expect("tasks").len(), 1);
+        assert_eq!(listed["tasks"][0]["id"], "visible-task");
+        assert_eq!(digested["tasks"].as_array().expect("tasks").len(), 1);
+        assert_eq!(digested["counts"]["tasks"], 1);
         Ok(())
     }
 
