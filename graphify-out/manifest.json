@@ -1,77 +1,82 @@
 {
   "src/lib.rs": {
-    "mtime": 1782442772.506242,
-    "ast_hash": "d3c7eb1c585d3497f7b0067ae54f1193",
+    "mtime": 1782926846.0668979,
+    "ast_hash": "4197e2fb3ac23556adbcd2758d5f196f",
     "semantic_hash": ""
   },
   "src/main.rs": {
-    "mtime": 1782442746.5648084,
-    "ast_hash": "ccc73a99ad78b3339a1a57cce91ddc5f",
+    "mtime": 1782813674.755376,
+    "ast_hash": "e28fce2a0b215c9514e90b67f087587a",
     "semantic_hash": ""
   },
   "AGENTS.md": {
-    "mtime": 1782435738.3688805,
-    "ast_hash": "528bfd0b9534806e59339f53a478b8d5",
+    "mtime": 1782788440.5024197,
+    "ast_hash": "b4f817eacaa58f53638d2e644752c109",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
-    "mtime": 1782435738.3688805,
-    "ast_hash": "528bfd0b9534806e59339f53a478b8d5",
+    "mtime": 1782788440.5024197,
+    "ast_hash": "b4f817eacaa58f53638d2e644752c109",
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1782442925.3135588,
-    "ast_hash": "91064de2e3e52e94e487014c652e2790",
+    "mtime": 1782813747.0496116,
+    "ast_hash": "6d24079a68b9d1254c911b502f1ebf28",
     "semantic_hash": ""
   },
   "docs/GRAPH_POLICY.md": {
-    "mtime": 1782442948.501879,
-    "ast_hash": "0166c5db6fb97915a49e4e19da29485a",
+    "mtime": 1782813747.9036145,
+    "ast_hash": "83d3cb2e890aad0f051ab435a6c87279",
     "semantic_hash": ""
   },
   "docs/MCP_POLICY.md": {
-    "mtime": 1782442968.6581516,
-    "ast_hash": "d5793acb763ccf719b694a409a22d5e0",
+    "mtime": 1782788440.5024197,
+    "ast_hash": "62c74fa9b0f8326af36d9f28f5682143",
     "semantic_hash": ""
   },
   "docs/PROGRESS.md": {
-    "mtime": 1782443018.904809,
-    "ast_hash": "fa47ce29765f2a4e221a1bbec6de2076",
+    "mtime": 1782927016.1019483,
+    "ast_hash": "73b54da6ab9adc4c76759401e22cb9a8",
     "semantic_hash": ""
   },
   "docs/SCOPE.md": {
-    "mtime": 1782442938.0497355,
-    "ast_hash": "62d85d22b9758f457a2ec3db00c95f61",
+    "mtime": 1782813747.3396127,
+    "ast_hash": "888c5bfbb3decc7466ced14008cd03b4",
     "semantic_hash": ""
   },
   "docs/SECURITY_POLICY.md": {
-    "mtime": 1782442977.4302688,
-    "ast_hash": "a8b3c2ab9e36af73b8ea45fd5d4161f4",
+    "mtime": 1782926884.1621351,
+    "ast_hash": "f1aeaafafc208336ff68c3ba71d9beaf",
     "semantic_hash": ""
   },
   "docs/SKILL_POLICY.md": {
-    "mtime": 1782442985.312373,
-    "ast_hash": "f7570b9db3dbbe0ca9bd8493937f1190",
+    "mtime": 1782788440.5034196,
+    "ast_hash": "8e0df00e0a4bc955ba513ce90ccab1a7",
     "semantic_hash": ""
   },
   ".codex/hooks.json": {
-    "mtime": 1782355919.4408891,
-    "ast_hash": "05935c0919496bb0c417d1d59d36442d",
-    "semantic_hash": "05935c0919496bb0c417d1d59d36442d"
+    "mtime": 1782788440.5024197,
+    "ast_hash": "8559c8a411bf486844dac138c3b71089",
+    "semantic_hash": ""
   },
   "docs/PRODUCT_HANDOFF.md": {
-    "mtime": 1782356110.1707804,
-    "ast_hash": "4fff5cad8d3afdb1b6438b26d3157876",
+    "mtime": 1782788440.5034196,
+    "ast_hash": "849136bd376be77dd8720390ce3f3205",
     "semantic_hash": ""
   },
   "src/mcp.rs": {
-    "mtime": 1782442567.6894135,
-    "ast_hash": "93af12a4a1ed517042da178aa6d4307a",
+    "mtime": 1782788440.5064197,
+    "ast_hash": "a697ccb0f4f50256083fe378f1b1334d",
     "semantic_hash": ""
   },
-  "task.md": {
-    "mtime": 1782442901.9442282,
-    "ast_hash": "4798021f5e3d67c05429d9442d229155",
+  ".github/workflows/rust.yml": {
+    "mtime": 1782788440.3756897,
+    "ast_hash": "57dfd7ede73e89d11ea644083f5cbcca",
+    "semantic_hash": ""
+  },
+  "docs/OKF_POLICY.md": {
+    "mtime": 1782926874.2780738,
+    "ast_hash": "67d4921a9823a180f2b9f9a5428a82d7",
     "semantic_hash": ""
   }
 }
