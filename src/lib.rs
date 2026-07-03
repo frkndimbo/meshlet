@@ -1888,16 +1888,7 @@ impl Meshlet {
                 .or_insert(0) += 1;
             report.merge(scan_payload_safety(&event.payload));
         }
-        for node in self.graph_nodes_limited(None, MAX_LIMIT)? {
-            if let Some(attrs) = node.get("attrs") {
-                report.merge(scan_payload_safety(attrs));
-            }
-        }
-        for edge in self.graph_edges_limited(None, MAX_LIMIT)? {
-            if let Some(attrs) = edge.get("attrs") {
-                report.merge(scan_payload_safety(attrs));
-            }
-        }
+        report.merge(self.scan_graph_attrs_safety()?);
         let ok = chain.ok && report.blocked_keys.is_empty() && report.suspicious_values.is_empty();
         Ok(json!({
             "ok": ok,
@@ -1907,6 +1898,24 @@ impl Meshlet {
             "redaction_report": report,
             "blockers": if ok { json!([]) } else { json!(["stored state is not public-safe"]) },
         }))
+    }
+
+    fn scan_graph_attrs_safety(&self) -> Result<RedactionReport> {
+        let mut report = RedactionReport::default();
+        for table in ["graph_nodes", "graph_edges"] {
+            let mut stmt = self
+                .conn
+                .prepare(&format!("SELECT attrs_json FROM {table}"))?;
+            let attrs = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for attrs_json in attrs {
+                let attrs: Value = serde_json::from_str(&attrs_json)
+                    .with_context(|| format!("parse {table} attrs_json"))?;
+                report.merge(scan_payload_safety(&attrs));
+            }
+        }
+        Ok(report)
     }
 
     pub fn okf_doctor(bundle_dir: impl AsRef<Path>) -> Result<Value> {
@@ -4832,6 +4841,36 @@ mod tests {
                 .as_array()
                 .expect("suspicious")
                 .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_doctor_scans_all_graph_attrs() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        for index in 0..MAX_LIMIT {
+            meshlet.conn.execute(
+                "INSERT INTO graph_nodes(id, kind, label, attrs_json, source_event_id, visibility)
+                 VALUES(?1, 'context', 'safe', '{}', 'manual', 'private')",
+                params![format!("aaa-safe-{index:03}")],
+            )?;
+        }
+        meshlet.conn.execute(
+            "INSERT INTO graph_nodes(id, kind, label, attrs_json, source_event_id, visibility)
+             VALUES('zzz-secret', 'context', 'secret', ?1, 'manual', 'private')",
+            params![r#"{"note":"Bearer leaked-token"}"#],
+        )?;
+
+        let report = meshlet.public_doctor()?;
+
+        assert_eq!(report["ok"], false);
+        assert!(
+            report["redaction_report"]["suspicious_values"]
+                .as_array()
+                .expect("suspicious")
+                .iter()
+                .any(|path| path == "payload.note")
         );
         Ok(())
     }
