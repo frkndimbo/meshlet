@@ -44,6 +44,7 @@ v0.4 - Agent Mailbox.
 - Agent docs and policy docs exist: AGENTS.md, README.md, docs/SCOPE.md, docs/MCP_POLICY.md, docs/SKILL_POLICY.md, docs/SECURITY_POLICY.md, docs/GRAPH_POLICY.md.
 - OKF policy docs exist in docs/OKF_POLICY.md.
 - v0.4 release smoke checklist exists in docs/RELEASE_CHECKLIST.md.
+- GitHub publication metadata and repository hygiene notes exist in docs/GITHUB_PUBLICATION.md.
 - Graphify Codex integration is installed through AGENTS.md, .codex/hooks.json, and .codex/skills/graphify.
 - Graphify code graph exists in graphify-out/ with GRAPH_REPORT.md, graph.json, and manifest.json. Semantic extraction was quota-blocked, so the current graph is code-focused.
 - Ponytail is installed and enabled in the local Codex plugin registry as a simplicity/over-engineering guard. Project rules keep it subordinate to Meshlet safety, scope, architecture, and verification gates.
@@ -51,6 +52,7 @@ v0.4 - Agent Mailbox.
 
 ## Last Verified
 
+- 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after README/publication hygiene refinement. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, `rtk cargo build`, `rtk cargo test`, and v0.4 release smoke checklist passed after adding the release checklist and CI quality gates. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after v0.4 strict hash-chain docs. Test result: 74 passed.
 - 2026-07-02: `rtk cargo fmt --check`, `rtk cargo check`, `rtk cargo test`, and OKF export/doctor smoke passed after public export mailbox/timeline coverage. Test result: 69 passed.
