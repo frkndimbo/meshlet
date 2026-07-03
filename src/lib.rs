@@ -529,6 +529,7 @@ impl Meshlet {
                 &record.event.created_at,
                 &record.event.actor,
                 &record.event.payload,
+                record.event.visibility,
                 record.event.prev_hash.as_deref(),
             )?;
             if record.event.hash != expected_hash {
@@ -590,6 +591,7 @@ impl Meshlet {
                 &created_at,
                 actor,
                 &payload,
+                visibility,
                 prev_hash.as_deref(),
             )?;
             let next_seq = self.next_seq()?;
@@ -3667,6 +3669,7 @@ fn event_hash(
     created_at: &str,
     actor: &str,
     payload: &Value,
+    visibility: EventVisibility,
     prev_hash: Option<&str>,
 ) -> Result<String> {
     let body = json!({
@@ -3674,6 +3677,7 @@ fn event_hash(
         "type": event_type,
         "created_at": created_at,
         "actor": actor,
+        "visibility": visibility.as_str(),
         "payload": payload,
         "prev_hash": prev_hash,
     });
@@ -4460,6 +4464,7 @@ mod tests {
             created_at,
             "agent:test",
             &payload,
+            EventVisibility::Private,
             None,
         )?;
         conn.execute(
@@ -5183,6 +5188,30 @@ mod tests {
         assert!(!report.ok);
         assert_eq!(report.first_invalid_seq, Some(2));
         assert_eq!(report.reason.as_deref(), Some("prev_hash_mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_event_chain_detects_tampered_visibility() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let event = meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "private"}),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.conn.execute(
+            "UPDATE events SET visibility = ?1 WHERE id = ?2",
+            params!["public", event.id],
+        )?;
+
+        let report = meshlet.verify_event_chain()?;
+
+        assert!(!report.ok);
+        assert_eq!(report.first_invalid_seq, Some(2));
+        assert_eq!(report.reason.as_deref(), Some("hash_mismatch"));
         Ok(())
     }
 
