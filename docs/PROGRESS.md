@@ -43,6 +43,7 @@ v0.4 - Agent Mailbox.
 - Tests cover init, hash chaining, chain verification, secret-key rejection, public-safe value rejection, visibility-filtered compact query, context materialization, deterministic context and FTS rebuilds, v2-to-v3 context migration, graph/skill SQL visibility materialization, v3-to-v4 migration, v4-to-v5 FTS migration, v5-to-v6 task/mailbox read-model creation, FTS-backed events/contexts/graph/skills search, public-safe FTS limit regression, public-safe task filtering, public doctor/export coverage, OKF message/timeline export, skill materialization and validation, deterministic query, graph imports, graph rebuild determinism, namespace filtering, task/evidence/mailbox/timeline views, evidence digest verification, bounded context, and direct MCP behavior for initialize, tools, resources, v0.4 task/mailbox/timeline tools, public-safe guards, and invalid tool params.
 - Agent docs and policy docs exist: AGENTS.md, README.md, docs/SCOPE.md, docs/MCP_POLICY.md, docs/SKILL_POLICY.md, docs/SECURITY_POLICY.md, docs/GRAPH_POLICY.md.
 - OKF policy docs exist in docs/OKF_POLICY.md.
+- v0.4 release smoke checklist exists in docs/RELEASE_CHECKLIST.md.
 - Graphify Codex integration is installed through AGENTS.md, .codex/hooks.json, and .codex/skills/graphify.
 - Graphify code graph exists in graphify-out/ with GRAPH_REPORT.md, graph.json, and manifest.json. Semantic extraction was quota-blocked, so the current graph is code-focused.
 - Ponytail is installed and enabled in the local Codex plugin registry as a simplicity/over-engineering guard. Project rules keep it subordinate to Meshlet safety, scope, architecture, and verification gates.
@@ -50,6 +51,7 @@ v0.4 - Agent Mailbox.
 
 ## Last Verified
 
+- 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, `rtk cargo build`, `rtk cargo test`, and v0.4 release smoke checklist passed after adding the release checklist and CI quality gates. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after v0.4 strict hash-chain docs. Test result: 74 passed.
 - 2026-07-02: `rtk cargo fmt --check`, `rtk cargo check`, `rtk cargo test`, and OKF export/doctor smoke passed after public export mailbox/timeline coverage. Test result: 69 passed.
 - 2026-07-02: Graphify refreshed after v0.4 public export stabilization. Result: 404 nodes, 1415 edges, 30 communities.
@@ -76,9 +78,9 @@ v0.4 - Agent Mailbox.
 
 ## Next 3 Tasks
 
-1. Decide whether OKF import should enter a later phase after export behavior stabilizes.
-2. Design the blob/CCR metadata table and retrieve-by-hash flow after mailbox read-model visibility stays stable.
-3. Prepare a v0.4 release smoke checklist after public export behavior remains stable.
+1. Refresh Graphify outputs after the release checklist and CI changes land.
+2. Rerun the v0.4 release smoke checklist from the final release commit before tagging.
+3. Design the blob/CCR metadata table and retrieve-by-hash flow after v0.4 release hardening closes.
 
 ## Maintenance Rules
 
