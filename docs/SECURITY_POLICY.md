@@ -14,6 +14,8 @@
 
 - Event visibility is `private`, `local`, or `public`.
 - Default visibility is `private`.
+- Event hashes include event visibility. Changing a stored event between `private`, `local`, and `public` must fail chain verification.
+- v0.4 uses strict visibility-bound hashes; pre-hardening local DBs may fail `meshlet verify` and should be treated as legacy local state.
 - Public-safe query, digest, and export paths must only return public events and graph data derived from public events.
 - Public-safe OKF export must only write public contexts, tasks, message envelopes, skills, evidence, graph links, timeline entries, and event-log entries.
 - Public-safe task and timeline reads must replay only public task/message/evidence events.

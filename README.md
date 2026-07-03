@@ -64,6 +64,8 @@ rtk cargo check
 rtk cargo test
 ```
 
+v0.4 hardening note: event hashes include event visibility. If `verify` fails on a pre-hardening local DB, treat it as legacy local state and export any needed public data before creating fresh `.meshlet/` state.
+
 ## v0.4 Scope
 
 - Event log as source of truth.
