@@ -10,6 +10,7 @@ v0.4 - Agent Mailbox.
 - SQLite event log exists under `.meshlet/` after `meshlet init`.
 - Events include `repo.initialized`, `skill.added`, `context.added`, `agent.message`, `evidence.attached`, `task.created`, `task.updated`, and `graph.imported`.
 - Event hash chains can be verified with `meshlet verify`.
+- v0.4 hardening uses strict visibility-bound event hashes; pre-hardening local DBs may fail verification and should be treated as legacy local state.
 - Contexts are materialized from `context.added` events into the `contexts` read model.
 - Tasks are materialized from `task.created` and `task.updated` events into the `tasks` read model.
 - Agent messages are materialized from `agent.message` events into the `mailbox_messages` read model.
@@ -49,6 +50,7 @@ v0.4 - Agent Mailbox.
 
 ## Last Verified
 
+- 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after v0.4 strict hash-chain docs. Test result: 74 passed.
 - 2026-07-02: `rtk cargo fmt --check`, `rtk cargo check`, `rtk cargo test`, and OKF export/doctor smoke passed after public export mailbox/timeline coverage. Test result: 69 passed.
 - 2026-07-02: Graphify refreshed after v0.4 public export stabilization. Result: 404 nodes, 1415 edges, 30 communities.
 - 2026-06-30: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after OKF public export and doctor implementation. Test result: 69 passed.
