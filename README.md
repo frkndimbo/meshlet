@@ -102,4 +102,5 @@ v0.4 hardening note: event hashes include event visibility. If `verify` fails on
 - `docs/SECURITY_POLICY.md` - local safety rules.
 - `docs/GRAPH_POLICY.md` - event/graph/Graphify rules.
 - `docs/OKF_POLICY.md` - OKF export and doctor rules.
+- `docs/RELEASE_CHECKLIST.md` - v0.4 release smoke checklist.
 - `docs/PRODUCT_HANDOFF.md` - product direction and phased roadmap.
