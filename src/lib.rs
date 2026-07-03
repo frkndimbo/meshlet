@@ -491,9 +491,13 @@ impl Meshlet {
     }
 
     pub fn event_count(&self) -> Result<u64> {
-        let count: u64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+        self.event_count_scoped(SafetyProfile::LocalTrusted)
+    }
+
+    fn event_count_scoped(&self, profile: SafetyProfile) -> Result<u64> {
+        let visibility = visibility_clause(profile);
+        let sql = format!("SELECT COUNT(*) FROM events WHERE {visibility}");
+        let count: u64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
         Ok(count)
     }
 
@@ -525,6 +529,7 @@ impl Meshlet {
                 &record.event.created_at,
                 &record.event.actor,
                 &record.event.payload,
+                record.event.visibility,
                 record.event.prev_hash.as_deref(),
             )?;
             if record.event.hash != expected_hash {
@@ -586,6 +591,7 @@ impl Meshlet {
                 &created_at,
                 actor,
                 &payload,
+                visibility,
                 prev_hash.as_deref(),
             )?;
             let next_seq = self.next_seq()?;
@@ -638,11 +644,24 @@ impl Meshlet {
     }
 
     fn list_events_bounded(&self, limit: u32) -> Result<Bounded<Event>> {
+        self.list_events_bounded_scoped(limit, SafetyProfile::LocalTrusted)
+    }
+
+    fn list_events_bounded_scoped(
+        &self,
+        limit: u32,
+        profile: SafetyProfile,
+    ) -> Result<Bounded<Event>> {
         let limit = clamp_limit(limit);
-        let mut stmt = self.conn.prepare(
+        let visibility = visibility_clause(profile);
+        let sql = format!(
             "SELECT id, type, created_at, actor, payload_json, visibility, hash, prev_hash
-             FROM events ORDER BY seq DESC LIMIT ?1",
-        )?;
+             FROM events
+             WHERE {visibility}
+             ORDER BY seq DESC
+             LIMIT ?1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut events = stmt
             .query_map([limit + 1], event_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1301,10 +1320,18 @@ impl Meshlet {
     }
 
     pub fn graph_namespaces(&self) -> Result<Vec<String>> {
+        self.graph_namespaces_scoped(SafetyProfile::LocalTrusted)
+    }
+
+    pub fn graph_namespaces_scoped(&self, profile: SafetyProfile) -> Result<Vec<String>> {
         let mut namespaces = BTreeSet::new();
-        let mut stmt = self.conn.prepare(
-            "SELECT attrs_json FROM graph_nodes UNION ALL SELECT attrs_json FROM graph_edges",
-        )?;
+        let visibility = visibility_clause(profile);
+        let sql = format!(
+            "SELECT attrs_json FROM graph_nodes WHERE {visibility}
+             UNION ALL
+             SELECT attrs_json FROM graph_edges WHERE {visibility}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let attrs = stmt
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1369,15 +1396,8 @@ impl Meshlet {
 
     pub fn context_digest_limited(&self, limit: u32, profile: SafetyProfile) -> Result<Value> {
         let limit = clamp_limit(limit);
-        let events = self.list_events_bounded(limit)?;
-        let event_items = events
-            .items
-            .iter()
-            .filter(|event| {
-                profile != SafetyProfile::PublicSafe || event.visibility == EventVisibility::Public
-            })
-            .map(compact_event)
-            .collect::<Vec<_>>();
+        let events = self.list_events_bounded_scoped(limit, profile)?;
+        let event_items = events.items.iter().map(compact_event).collect::<Vec<_>>();
         let nodes = self.graph_nodes_bounded(None, limit, profile)?;
         let edges = self.graph_edges_bounded(None, limit, profile)?;
         Ok(json!({
@@ -1388,10 +1408,10 @@ impl Meshlet {
             },
             "limit": limit,
             "counts": {
-                "events": self.event_count()?,
+                "events": self.event_count_scoped(profile)?,
                 "skills": self.list_skills_scoped(profile)?.len(),
                 "tasks": self.list_tasks_scoped(limit, profile)?.len(),
-                "namespaces": self.graph_namespaces()?.len(),
+                "namespaces": self.graph_namespaces_scoped(profile)?.len(),
             },
             "events_recent": {
                 "items": event_items,
@@ -1569,9 +1589,9 @@ impl Meshlet {
     pub fn public_export(&self, limit: u32) -> Result<Value> {
         let limit = clamp_limit(limit);
         let events = self
-            .list_events(limit)?
+            .list_events_bounded_scoped(limit, SafetyProfile::PublicSafe)?
+            .items
             .into_iter()
-            .filter(|event| event.visibility == EventVisibility::Public)
             .map(|event| compact_event(&event))
             .collect::<Vec<_>>();
         let tasks = self.list_tasks_scoped(limit, SafetyProfile::PublicSafe)?;
@@ -1581,20 +1601,18 @@ impl Meshlet {
             .filter_map(|task| string_value(task, "id"))
             .map(|task_id| self.task_timeline(task_id, limit, SafetyProfile::PublicSafe))
             .collect::<Result<Vec<_>>>()?;
-        let nodes = filter_public_values(
-            self.graph_nodes_limited(None, limit)?,
-            SafetyProfile::PublicSafe,
-        )
-        .into_iter()
-        .map(compact_node)
-        .collect::<Vec<_>>();
-        let edges = filter_public_values(
-            self.graph_edges_limited(None, limit)?,
-            SafetyProfile::PublicSafe,
-        )
-        .into_iter()
-        .map(compact_edge)
-        .collect::<Vec<_>>();
+        let nodes = self
+            .graph_nodes_bounded(None, limit, SafetyProfile::PublicSafe)?
+            .items
+            .into_iter()
+            .map(compact_node)
+            .collect::<Vec<_>>();
+        let edges = self
+            .graph_edges_bounded(None, limit, SafetyProfile::PublicSafe)?
+            .items
+            .into_iter()
+            .map(compact_edge)
+            .collect::<Vec<_>>();
         Ok(json!({
             "format": "meshlet-public-export-v1",
             "profile": "public-safe",
@@ -1870,16 +1888,7 @@ impl Meshlet {
                 .or_insert(0) += 1;
             report.merge(scan_payload_safety(&event.payload));
         }
-        for node in self.graph_nodes_limited(None, MAX_LIMIT)? {
-            if let Some(attrs) = node.get("attrs") {
-                report.merge(scan_payload_safety(attrs));
-            }
-        }
-        for edge in self.graph_edges_limited(None, MAX_LIMIT)? {
-            if let Some(attrs) = edge.get("attrs") {
-                report.merge(scan_payload_safety(attrs));
-            }
-        }
+        report.merge(self.scan_graph_attrs_safety()?);
         let ok = chain.ok && report.blocked_keys.is_empty() && report.suspicious_values.is_empty();
         Ok(json!({
             "ok": ok,
@@ -1889,6 +1898,24 @@ impl Meshlet {
             "redaction_report": report,
             "blockers": if ok { json!([]) } else { json!(["stored state is not public-safe"]) },
         }))
+    }
+
+    fn scan_graph_attrs_safety(&self) -> Result<RedactionReport> {
+        let mut report = RedactionReport::default();
+        for table in ["graph_nodes", "graph_edges"] {
+            let mut stmt = self
+                .conn
+                .prepare(&format!("SELECT attrs_json FROM {table}"))?;
+            let attrs = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for attrs_json in attrs {
+                let attrs: Value = serde_json::from_str(&attrs_json)
+                    .with_context(|| format!("parse {table} attrs_json"))?;
+                report.merge(scan_payload_safety(&attrs));
+            }
+        }
+        Ok(report)
     }
 
     pub fn okf_doctor(bundle_dir: impl AsRef<Path>) -> Result<Value> {
@@ -3412,13 +3439,6 @@ fn compact_query(mut value: Value, profile: SafetyProfile) -> Value {
     value
 }
 
-fn filter_public_values(values: Vec<Value>, profile: SafetyProfile) -> Vec<Value> {
-    if profile != SafetyProfile::PublicSafe {
-        return values;
-    }
-    values.into_iter().filter(value_is_public).collect()
-}
-
 fn prepare_okf_output_dir(path: &Path) -> Result<()> {
     if path.exists() {
         if !path.is_dir() {
@@ -3658,6 +3678,7 @@ fn event_hash(
     created_at: &str,
     actor: &str,
     payload: &Value,
+    visibility: EventVisibility,
     prev_hash: Option<&str>,
 ) -> Result<String> {
     let body = json!({
@@ -3665,6 +3686,7 @@ fn event_hash(
         "type": event_type,
         "created_at": created_at,
         "actor": actor,
+        "visibility": visibility.as_str(),
         "payload": payload,
         "prev_hash": prev_hash,
     });
@@ -4451,6 +4473,7 @@ mod tests {
             created_at,
             "agent:test",
             &payload,
+            EventVisibility::Private,
             None,
         )?;
         conn.execute(
@@ -4823,6 +4846,36 @@ mod tests {
     }
 
     #[test]
+    fn public_doctor_scans_all_graph_attrs() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        for index in 0..MAX_LIMIT {
+            meshlet.conn.execute(
+                "INSERT INTO graph_nodes(id, kind, label, attrs_json, source_event_id, visibility)
+                 VALUES(?1, 'context', 'safe', '{}', 'manual', 'private')",
+                params![format!("aaa-safe-{index:03}")],
+            )?;
+        }
+        meshlet.conn.execute(
+            "INSERT INTO graph_nodes(id, kind, label, attrs_json, source_event_id, visibility)
+             VALUES('zzz-secret', 'context', 'secret', ?1, 'manual', 'private')",
+            params![r#"{"note":"Bearer leaked-token"}"#],
+        )?;
+
+        let report = meshlet.public_doctor()?;
+
+        assert_eq!(report["ok"], false);
+        assert!(
+            report["redaction_report"]["suspicious_values"]
+                .as_array()
+                .expect("suspicious")
+                .iter()
+                .any(|path| path == "payload.note")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn public_export_contains_only_public_compact_state() -> Result<()> {
         let dir = tempdir()?;
         let meshlet = Meshlet::init(dir.path())?;
@@ -4897,6 +4950,100 @@ mod tests {
         assert!(!export_text.contains("public body omitted"));
         assert!(!export_text.contains("Private handoff"));
         assert!(!export_text.contains("private body omitted"));
+        Ok(())
+    }
+
+    #[test]
+    fn public_export_filters_public_rows_before_limit() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "zzz-public",
+                "nodes": [{"id": "public-node", "label": "Public node"}],
+                "links": [{"source": "public-node", "target": "public-node", "relation": "references"}]
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        for index in 0..3 {
+            meshlet.append_event_with_options(
+                "graph.imported",
+                "agent:test",
+                json!({
+                    "source": "graphify",
+                    "namespace": "aaa-private",
+                    "nodes": [{"id": format!("hidden-node-{index}"), "label": "Hidden node"}],
+                    "links": [{"source": format!("hidden-node-{index}"), "target": format!("hidden-node-{index}"), "relation": "references"}]
+                }),
+                EventVisibility::Private,
+                SafetyProfile::LocalTrusted,
+            )?;
+        }
+
+        let export = meshlet.public_export(1)?;
+        let events = export["events"].as_array().expect("events");
+        let nodes = export["graph"]["nodes"].as_array().expect("nodes");
+        let edges = export["graph"]["edges"].as_array().expect("edges");
+
+        assert_eq!(events.len(), 1);
+        assert!(events.iter().all(|event| event["visibility"] == "public"));
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0]["id"], "zzz-public:public-node");
+        assert_eq!(nodes[0]["visibility"], "public");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["visibility"], "public");
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_digest_scopes_counts_and_namespaces() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "public-ns",
+                "nodes": [{"id": "public-node", "label": "Public node"}],
+                "links": []
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "private-ns",
+                "nodes": [{"id": "private-node", "label": "Private node"}],
+                "links": []
+            }),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+
+        let digest = meshlet.context_digest_limited(1, SafetyProfile::PublicSafe)?;
+
+        assert_eq!(digest["counts"]["events"], 1);
+        assert_eq!(digest["counts"]["namespaces"], 1);
+        assert_eq!(
+            digest["events_recent"]["items"]
+                .as_array()
+                .expect("events")
+                .len(),
+            1
+        );
+        assert_eq!(
+            digest["graph"]["nodes"]["items"][0]["id"],
+            "public-ns:public-node"
+        );
+        assert_eq!(digest["graph"]["nodes"]["items"][0]["visibility"], "public");
         Ok(())
     }
 
@@ -5080,6 +5227,30 @@ mod tests {
         assert!(!report.ok);
         assert_eq!(report.first_invalid_seq, Some(2));
         assert_eq!(report.reason.as_deref(), Some("prev_hash_mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_event_chain_detects_tampered_visibility() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let event = meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "private"}),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.conn.execute(
+            "UPDATE events SET visibility = ?1 WHERE id = ?2",
+            params!["public", event.id],
+        )?;
+
+        let report = meshlet.verify_event_chain()?;
+
+        assert!(!report.ok);
+        assert_eq!(report.first_invalid_seq, Some(2));
+        assert_eq!(report.reason.as_deref(), Some("hash_mismatch"));
         Ok(())
     }
 
@@ -6111,6 +6282,54 @@ description = "Review Rust code through resources."
         let value: Value = serde_json::from_str(mcp_resource_text(&response))?;
 
         assert_eq!(value["namespaces"][0], "graphify:repo");
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_public_safe_graph_namespaces_resource_filters_visibility() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "public-ns",
+                "nodes": [{"id": "a", "label": "A"}],
+                "links": []
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "private-ns",
+                "nodes": [{"id": "b", "label": "B"}],
+                "links": []
+            }),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": { "uri": "meshlet://graph/namespaces" }
+        });
+
+        let response = handle_mcp_request_with_profile(
+            &meshlet,
+            &request,
+            json!(1),
+            SafetyProfile::PublicSafe,
+        );
+        let value: Value = serde_json::from_str(mcp_resource_text(&response))?;
+
+        assert_eq!(value["namespaces"].as_array().expect("namespaces").len(), 1);
+        assert_eq!(value["namespaces"][0], "public-ns");
         Ok(())
     }
 
