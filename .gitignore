@@ -1,21 +1,74 @@
+# Rust build output
 /target
+**/*.rs.bk
+*.profraw
+
+# Meshlet local runtime state
 .meshlet/
+meshlet.db
 *.db
+*.db-*
 *.sqlite
+*.sqlite-*
 *.sqlite3
+*.sqlite3-*
+
+# Local/public export artifacts. Regenerate these from local state instead.
+.meshlet-exports/
+meshlet-public*.json
+meshlet-export*.json
+meshlet-okf*/
+okf-export*/
+public-export*/
+private-evidence/
+local-evidence/
+
+# Logs and temporary files
 *.log
+*.log.*
 *.tmp
 *.temp
+*.pid
+
+# OS/editor noise
 .DS_Store
 Thumbs.db
 desktop.ini
+.vscode/
+.idea/
 *.swp
+*.swo
 *.bak
 *.backup.*
 *~
+
+# Secrets and local environment
 .env
 .env.*
 !.env.example
+.envrc
+.direnv/
+*.pem
+*.key
+*.p12
+*.pfx
+*.age
+*.kdbx
+id_rsa*
+id_ed25519*
+*_rsa
+*_ed25519
+secrets.*
+*.secret
+*.credentials
+
+# Local Codex/agent state. Keep committed config explicit.
+.codex/sessions/
+.codex/inbox/
+.codex/tmp/
+.codex/*.local.json
+
+# Graphify generated caches and snapshots
 graphify-out/cache/
 graphify-out/[0-9][0-9][0-9][0-9]-*/
 graphify-out/graph.html
