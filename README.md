@@ -37,46 +37,44 @@ The event log is the source of truth. Graph, task, mailbox, timeline, evidence, 
 
 ## Quick Start
 
-This repository uses `rtk` in local agent workflows. If you are not using RTK, remove the `rtk` prefix and run the equivalent `cargo` command.
-
 ```bash
-rtk cargo build
-rtk cargo run -- init
-rtk cargo run -- status
+cargo build
+cargo run -- init
+cargo run -- status
 ```
 
 Append and inspect a context event:
 
 ```bash
-rtk cargo run -- event append --type context.added --json '{"label":"repo context"}'
-rtk cargo run -- event list
-rtk cargo run -- verify
+cargo run -- event append --type context.added --json '{"label":"repo context"}'
+cargo run -- event list
+cargo run -- verify
 ```
 
 Run a compact query:
 
 ```bash
-rtk cargo run -- query "repo context" --kind all --limit 20 --mode compact
+cargo run -- query "repo context" --kind all --limit 20 --mode compact
 ```
 
 ## Common Commands
 
 | Command | Purpose |
 |---|---|
-| `rtk cargo run -- init` | Create local `.meshlet/` state. |
-| `rtk cargo run -- status` | Show local runtime status. |
-| `rtk cargo run -- verify` | Verify event hash-chain integrity. |
-| `rtk cargo run -- event list` | List events. |
-| `rtk cargo run -- query "term" --kind all --limit 20 --mode compact` | Search compact local context. |
-| `rtk cargo run -- graph import graphify-out/graph.json --source graphify --namespace graphify:repo` | Import a namespaced Graphify graph. |
-| `rtk cargo run -- skill add ./skill.toml` | Register a skill manifest. |
-| `rtk cargo run -- task create --task-id task-1 --title "Ship mailbox"` | Create a typed task event. |
-| `rtk cargo run -- mailbox send --from agent:a --to agent:b --summary "Please handle task-1" --task-id task-1` | Send an agent mailbox message. |
-| `rtk cargo run -- evidence attach --path src/lib.rs --sha256 auto` | Attach evidence with a SHA-256 digest. |
-| `rtk cargo run -- doctor public` | Check whether public sharing is safe. |
-| `rtk cargo run -- export public --out /tmp/meshlet-public.json` | Write a compact public JSON bundle. |
-| `rtk cargo run -- export public --format okf --out /tmp/meshlet-okf` | Write a public-safe OKF markdown bundle. |
-| `rtk cargo run -- serve --mcp stdio --profile public-safe` | Start MCP stdio in public-safe mode. |
+| `cargo run -- init` | Create local `.meshlet/` state. |
+| `cargo run -- status` | Show local runtime status. |
+| `cargo run -- verify` | Verify event hash-chain integrity. |
+| `cargo run -- event list` | List events. |
+| `cargo run -- query "term" --kind all --limit 20 --mode compact` | Search compact local context. |
+| `cargo run -- graph import <graph.json> --source graphify --namespace graphify:repo` | Import a namespaced Graphify graph. |
+| `cargo run -- skill add ./skill.toml` | Register a skill manifest. |
+| `cargo run -- task create --task-id task-1 --title "Ship mailbox"` | Create a typed task event. |
+| `cargo run -- mailbox send --from agent:a --to agent:b --summary "Please handle task-1" --task-id task-1` | Send an agent mailbox message. |
+| `cargo run -- evidence attach --path src/lib.rs --sha256 auto` | Attach evidence with a SHA-256 digest. |
+| `cargo run -- doctor public` | Check whether public sharing is safe. |
+| `cargo run -- export public --out /tmp/meshlet-public.json` | Write a compact public JSON bundle. |
+| `cargo run -- export public --format okf --out /tmp/meshlet-okf` | Write a public-safe OKF markdown bundle. |
+| `cargo run -- serve --mcp stdio --profile public-safe` | Start MCP stdio in public-safe mode. |
 
 ## Public-Safe Sharing
 
@@ -85,10 +83,10 @@ Meshlet is local-first, but it can publish sanitized public state. Public-safe p
 Before sharing anything:
 
 ```bash
-rtk cargo run -- doctor public
-rtk cargo run -- export public --out /tmp/meshlet-public.json
-rtk cargo run -- export public --format okf --out /tmp/meshlet-okf
-rtk cargo run -- okf doctor /tmp/meshlet-okf
+cargo run -- doctor public
+cargo run -- export public --out /tmp/meshlet-public.json
+cargo run -- export public --format okf --out /tmp/meshlet-okf
+cargo run -- okf doctor /tmp/meshlet-okf
 ```
 
 Local runtime state, SQLite files, logs, private evidence, and generated exports must stay out of git.
@@ -96,9 +94,9 @@ Local runtime state, SQLite files, logs, private evidence, and generated exports
 ## Verification
 
 ```bash
-rtk cargo fmt --check
-rtk cargo check
-rtk cargo test
+cargo fmt --check
+cargo check
+cargo test
 ```
 
 The v0.4 release checklist is in `docs/RELEASE_CHECKLIST.md`.
