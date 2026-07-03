@@ -45,13 +45,13 @@ v0.4 - Agent Mailbox.
 - OKF policy docs exist in docs/OKF_POLICY.md.
 - v0.4 release smoke checklist exists in docs/RELEASE_CHECKLIST.md.
 - GitHub publication metadata and repository hygiene notes exist in docs/GITHUB_PUBLICATION.md.
-- Graphify Codex integration is installed through AGENTS.md, .codex/hooks.json, and .codex/skills/graphify.
-- Graphify code graph exists in graphify-out/ with GRAPH_REPORT.md, graph.json, and manifest.json. Semantic extraction was quota-blocked, so the current graph is code-focused.
+- Public repository no longer tracks local Codex config or generated Graphify output.
 - Ponytail is installed and enabled in the local Codex plugin registry as a simplicity/over-engineering guard. Project rules keep it subordinate to Meshlet safety, scope, architecture, and verification gates.
 - Local tool baselines: Graphify CLI/skill 0.9.1, Ponytail plugin 4.8.4, RTK 0.43.0.
 
 ## Last Verified
 
+- 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after removing tracked local Codex config and generated Graphify output. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after README/publication hygiene refinement. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, `rtk cargo build`, `rtk cargo test`, and v0.4 release smoke checklist passed after adding the release checklist and CI quality gates. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after v0.4 strict hash-chain docs. Test result: 74 passed.
@@ -80,8 +80,8 @@ v0.4 - Agent Mailbox.
 
 ## Next 3 Tasks
 
-1. Refresh Graphify outputs after the release checklist and CI changes land.
-2. Rerun the v0.4 release smoke checklist from the final release commit before tagging.
+1. Rerun the v0.4 release smoke checklist from the final release commit before tagging.
+2. Tag `v0.4.0` from clean `PUSAT` after release checks pass.
 3. Design the blob/CCR metadata table and retrieve-by-hash flow after v0.4 release hardening closes.
 
 ## Maintenance Rules

@@ -31,8 +31,7 @@ Tracked intentionally:
 - Rust source, Cargo metadata, and lockfile.
 - README, license, policy docs, release checklist, and product handoff.
 - GitHub Actions workflow.
-- Current Graphify summary outputs: `graphify-out/GRAPH_REPORT.md`, `graphify-out/graph.json`, and `graphify-out/manifest.json`.
-- Project agent rules and portable hook config.
+- Project agent rules that document local development conventions.
 
 Must stay untracked:
 
@@ -41,8 +40,8 @@ Must stay untracked:
 - Local exports and OKF bundles generated from private/local state.
 - Logs, temporary files, process IDs, and build output.
 - Environment files, keys, certificates, credential stores, and local secret files.
-- Graphify caches, dated snapshots, generated HTML, and hidden Graphify working files.
-- Local Codex/agent sessions, inboxes, scratch files, and local override configs.
+- Graphify generated output.
+- Local Codex/agent configuration, sessions, inboxes, scratch files, and overrides.
 
 Before publishing a release:
 
@@ -62,6 +61,4 @@ The ignore policy blocks the high-risk local artifacts for a public Meshlet repo
 - Runtime DBs: `.meshlet/`, `*.db`, `*.sqlite`, `*.sqlite3`, and SQLite sidecar suffixes.
 - Export artifacts: public JSON/OKF export names and local evidence directories.
 - Secrets: `.env*`, PEM/key/certificate bundles, SSH key names, age/KeePass stores, and generic secret/credential files.
-- Generated output: Rust `target/`, logs, temp files, editor metadata, Graphify cache/snapshots/HTML, and local Codex session state.
-
-One public-hygiene fix was applied: `.codex/hooks.json` now uses `graphify hook-check` instead of an absolute host path.
+- Generated output: Rust `target/`, logs, temp files, editor metadata, Graphify output, and local Codex/agent state.
