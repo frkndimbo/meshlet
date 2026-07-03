@@ -242,7 +242,7 @@ fn mcp_read_resource(meshlet: &Meshlet, uri: &str, profile: SafetyProfile) -> Re
             "evidence": meshlet.list_evidence_scoped(DEFAULT_LIMIT, profile)?,
         }),
         "meshlet://graph/namespaces" => json!({
-            "namespaces": meshlet.graph_namespaces()?,
+            "namespaces": meshlet.graph_namespaces_scoped(profile)?,
         }),
         "meshlet://graph" => {
             meshlet.context_digest_limited(DEFAULT_LIMIT, profile)?["graph"].clone()
