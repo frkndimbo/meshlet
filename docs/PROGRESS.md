@@ -7,6 +7,7 @@ v0.4 - Agent Mailbox.
 ## Current State
 
 - Rust CLI crate exists.
+- Core library implementation is split across focused modules under `src/` while `src/lib.rs` keeps public types, constants, shared helpers, and tests.
 - SQLite event log exists under `.meshlet/` after `meshlet init`.
 - Events include `repo.initialized`, `skill.added`, `context.added`, `agent.message`, `evidence.attached`, `task.created`, `task.updated`, and `graph.imported`.
 - Event hash chains can be verified with `meshlet verify`.
@@ -51,6 +52,7 @@ v0.4 - Agent Mailbox.
 
 ## Last Verified
 
+- 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after behavior-preserving `src/lib.rs` module split. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after removing tracked local Codex config and generated Graphify output. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after README/publication hygiene refinement. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, `rtk cargo build`, `rtk cargo test`, and v0.4 release smoke checklist passed after adding the release checklist and CI quality gates. Test result: 74 passed.
