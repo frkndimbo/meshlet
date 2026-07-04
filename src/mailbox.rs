@@ -64,6 +64,12 @@ impl Meshlet {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let truncated = messages.len() > limit as usize;
         messages.truncate(limit as usize);
+        if profile == SafetyProfile::PublicSafe {
+            messages = messages
+                .into_iter()
+                .map(public_mailbox_message)
+                .collect::<Vec<_>>();
+        }
         Ok(json!({
             "agent": agent,
             "direction": direction,
@@ -168,5 +174,36 @@ impl Meshlet {
             )?;
         }
         Ok(())
+    }
+}
+
+fn public_mailbox_message(message: Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for key in [
+        "id",
+        "from",
+        "to",
+        "task_id",
+        "summary",
+        "created_at",
+        "visibility",
+        "source_event_id",
+    ] {
+        insert_public_mailbox_string(&mut out, &message, key);
+    }
+    Value::Object(out)
+}
+
+fn insert_public_mailbox_string(
+    out: &mut serde_json::Map<String, Value>,
+    message: &Value,
+    key: &str,
+) {
+    let Some(value) = message.get(key).and_then(Value::as_str) else {
+        return;
+    };
+    let report = scan_payload_safety(&json!(value));
+    if report.blocked_keys.is_empty() && report.suspicious_values.is_empty() {
+        out.insert(key.to_string(), json!(value));
     }
 }
