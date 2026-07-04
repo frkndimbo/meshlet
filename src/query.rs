@@ -70,6 +70,33 @@ impl Meshlet {
         let event_items = events.items.iter().map(compact_event).collect::<Vec<_>>();
         let nodes = self.graph_nodes_bounded(None, limit, profile)?;
         let edges = self.graph_edges_bounded(None, limit, profile)?;
+        if profile == SafetyProfile::PublicSafe {
+            return Ok(json!({
+                "profile": "public-safe",
+                "limit": limit,
+                "counts": {
+                    "events": self.event_count_scoped(profile)?,
+                    "skills": self.list_skills_scoped(profile)?.len(),
+                    "tasks": self.list_tasks_scoped(limit, profile)?.len(),
+                    "namespaces": self.graph_namespaces_scoped(profile)?.len(),
+                },
+                "events_recent": {
+                    "items": event_items,
+                    "truncated": events.truncated,
+                },
+                "tasks": self.list_tasks_scoped(limit, profile)?,
+                "graph": {
+                    "nodes": {
+                        "items": nodes.items.into_iter().map(public_digest_node).collect::<Vec<_>>(),
+                        "truncated": nodes.truncated,
+                    },
+                    "edges": {
+                        "items": edges.items.into_iter().map(public_digest_edge).collect::<Vec<_>>(),
+                        "truncated": edges.truncated,
+                    },
+                }
+            }));
+        }
         Ok(json!({
             "root": self.root.display().to_string(),
             "profile": match profile {
@@ -344,4 +371,44 @@ impl Meshlet {
             truncated,
         })
     }
+}
+
+fn public_digest_node(node: Value) -> Value {
+    let mut out = serde_json::Map::new();
+    insert_public_digest_string(&mut out, &node, "id");
+    insert_public_digest_string(&mut out, &node, "kind");
+    insert_public_digest_string(&mut out, &node, "label");
+    insert_public_digest_string(&mut out, &node, "visibility");
+    insert_public_digest_string(&mut out, &node, "source_event_id");
+    Value::Object(out)
+}
+
+fn public_digest_edge(edge: Value) -> Value {
+    let mut out = serde_json::Map::new();
+    insert_public_digest_string(&mut out, &edge, "id");
+    insert_public_digest_string(&mut out, &edge, "from_id");
+    insert_public_digest_string(&mut out, &edge, "to_id");
+    insert_public_digest_string(&mut out, &edge, "kind");
+    insert_public_digest_string(&mut out, &edge, "visibility");
+    insert_public_digest_string(&mut out, &edge, "source_event_id");
+    Value::Object(out)
+}
+
+fn insert_public_digest_string(out: &mut serde_json::Map<String, Value>, value: &Value, key: &str) {
+    let Some(field) = value.get(key).and_then(Value::as_str) else {
+        return;
+    };
+    if !looks_path_like(field) {
+        out.insert(key.to_string(), json!(field));
+    }
+}
+
+fn looks_path_like(value: &str) -> bool {
+    value.starts_with('/')
+        || value.contains(":/")
+        || value.contains(":\\")
+        || value
+            .as_bytes()
+            .get(1)
+            .is_some_and(|byte| *byte == b':' && value.as_bytes()[0].is_ascii_alphabetic())
 }
