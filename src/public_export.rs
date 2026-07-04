@@ -1,8 +1,18 @@
 use super::*;
 
+fn require_public_doctor_ok(doctor: &Value) -> Result<()> {
+    let ok = doctor.get("ok").and_then(Value::as_bool) == Some(true);
+    if !ok {
+        bail!("public export blocked: public_doctor ok=false");
+    }
+    Ok(())
+}
+
 impl Meshlet {
     pub fn public_export(&self, limit: u32) -> Result<Value> {
         let limit = clamp_limit(limit);
+        let public_report = self.public_doctor()?;
+        require_public_doctor_ok(&public_report)?;
         let events = self
             .list_events_bounded_scoped(limit, SafetyProfile::PublicSafe)?
             .items
@@ -45,15 +55,16 @@ impl Meshlet {
                 "nodes": nodes,
                 "edges": edges,
             },
-            "redaction_report": self.public_doctor()?["redaction_report"].clone(),
+            "redaction_report": public_report["redaction_report"].clone(),
         }))
     }
 
     pub fn public_export_okf(&self, out_dir: impl AsRef<Path>, limit: u32) -> Result<Value> {
         let out_dir = out_dir.as_ref();
-        prepare_okf_output_dir(out_dir)?;
         let limit = clamp_limit(limit);
         let public_report = self.public_doctor()?;
+        require_public_doctor_ok(&public_report)?;
+        prepare_okf_output_dir(out_dir)?;
         let events = self
             .list_events(limit)?
             .into_iter()
