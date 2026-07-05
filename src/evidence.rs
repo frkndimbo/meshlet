@@ -6,17 +6,16 @@ impl Meshlet {
     }
 
     pub fn list_evidence_scoped(&self, limit: u32, profile: SafetyProfile) -> Result<Vec<Value>> {
-        Ok(self
-            .graph_nodes_bounded(Some("evidence"), limit, profile)?
-            .items)
+        match profile {
+            SafetyProfile::LocalTrusted => Ok(self
+                .graph_nodes_bounded(Some("evidence"), limit, profile)?
+                .items),
+            SafetyProfile::PublicSafe => self.list_public_safe_evidence(limit),
+        }
     }
 
     pub fn show_evidence(&self, id: &str) -> Result<Value> {
-        let node_id = if id.starts_with("evidence:") {
-            id.to_string()
-        } else {
-            format!("evidence:{id}")
-        };
+        let node_id = evidence_node_id(id);
         self.conn
             .query_row(
                 "SELECT id, kind, label, attrs_json, source_event_id, visibility
@@ -26,6 +25,47 @@ impl Meshlet {
             )
             .optional()?
             .ok_or_else(|| anyhow!("evidence not found: {id}"))
+    }
+
+    pub fn show_evidence_scoped(&self, id: &str, profile: SafetyProfile) -> Result<Value> {
+        match profile {
+            SafetyProfile::LocalTrusted => self.show_evidence(id),
+            SafetyProfile::PublicSafe => {
+                let node_id = evidence_node_id(id);
+                self.conn
+                    .query_row(
+                        "SELECT id, kind, label, attrs_json, source_event_id, visibility
+                         FROM graph_nodes
+                         WHERE id = ?1 AND kind = 'evidence' AND visibility = 'public'",
+                        [node_id.as_str()],
+                        |row| {
+                            let node = node_from_row(row)?;
+                            Ok(public_safe_evidence_node(node))
+                        },
+                    )
+                    .optional()?
+                    .ok_or_else(|| anyhow!("evidence not found: {id}"))
+            }
+        }
+    }
+
+    fn list_public_safe_evidence(&self, limit: u32) -> Result<Vec<Value>> {
+        let limit = clamp_limit(limit);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, label, attrs_json, source_event_id, visibility
+             FROM graph_nodes
+             WHERE kind = 'evidence' AND visibility = 'public'
+             ORDER BY id
+             LIMIT ?1",
+        )?;
+        let mut evidence = stmt
+            .query_map([i64::from(limit + 1)], |row| {
+                let node = node_from_row(row)?;
+                Ok(public_safe_evidence_node(node))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        evidence.truncate(limit as usize);
+        Ok(evidence)
     }
 
     pub fn attach_evidence_file(
@@ -130,5 +170,13 @@ impl Meshlet {
             )?;
         }
         Ok(())
+    }
+}
+
+fn evidence_node_id(id: &str) -> String {
+    if id.starts_with("evidence:") {
+        id.to_string()
+    } else {
+        format!("evidence:{id}")
     }
 }

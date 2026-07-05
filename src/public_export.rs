@@ -30,13 +30,13 @@ impl Meshlet {
             .graph_nodes_bounded(None, limit, SafetyProfile::PublicSafe)?
             .items
             .into_iter()
-            .map(compact_node)
+            .map(|node| compact_node_for_profile(node, SafetyProfile::PublicSafe))
             .collect::<Vec<_>>();
         let edges = self
             .graph_edges_bounded(None, limit, SafetyProfile::PublicSafe)?
             .items
             .into_iter()
-            .map(compact_edge)
+            .map(|edge| compact_edge_for_profile(edge, SafetyProfile::PublicSafe))
             .collect::<Vec<_>>();
         Ok(json!({
             "format": "meshlet-public-export-v1",
@@ -224,24 +224,26 @@ impl Meshlet {
 
         for item in evidence {
             let id = string_value(&item, "id").unwrap_or("evidence:unknown");
-            let attrs = item.get("attrs").unwrap_or(&Value::Null);
-            let evidence_ref = string_value(attrs, "path")
-                .or_else(|| string_value(attrs, "ref"))
-                .unwrap_or(id);
-            let sha256 = string_value(attrs, "sha256").unwrap_or("");
+            let sha256 = string_value(&item, "sha256").unwrap_or("");
             let mut body = String::new();
-            body.push_str(evidence_ref);
+            body.push_str("Public-safe evidence reference.");
             body.push_str("\n\n# Citations\n");
-            body.push_str(&format!("- `{evidence_ref}`"));
+            body.push_str(&format!("- `meshlet://evidence/{id}`"));
             if !sha256.is_empty() {
                 body.push_str(&format!(" sha256 `{sha256}`"));
             }
             body.push('\n');
+            if item.get("has_path").and_then(Value::as_bool) == Some(true) {
+                body.push_str("- Local path: redacted\n");
+            }
+            if item.get("has_ref").and_then(Value::as_bool) == Some(true) {
+                body.push_str("- Reference: redacted\n");
+            }
             documents.push(OkfDocument {
                 id: id.to_string(),
                 item_type: "Meshlet Evidence".to_string(),
-                title: evidence_ref.to_string(),
-                description: evidence_ref.to_string(),
+                title: id.to_string(),
+                description: "Public-safe evidence reference".to_string(),
                 resource: format!("meshlet://evidence/{id}"),
                 tags: vec!["meshlet".to_string(), "evidence".to_string()],
                 timestamp: String::new(),

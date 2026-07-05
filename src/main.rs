@@ -262,9 +262,13 @@ enum EvidenceCommand {
     List {
         #[arg(long, default_value_t = DEFAULT_LIMIT)]
         limit: u32,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
     },
     Show {
         id: String,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
     },
 }
 
@@ -499,8 +503,12 @@ fn main() -> Result<()> {
                     sha256.as_deref(),
                 )?)?,
                 EvidenceCommand::Verify { id } => print_json(&meshlet.verify_evidence(&id)?)?,
-                EvidenceCommand::List { limit } => print_json(&meshlet.list_evidence(limit)?)?,
-                EvidenceCommand::Show { id } => print_json(&meshlet.show_evidence(&id)?)?,
+                EvidenceCommand::List { limit, profile } => print_json(
+                    &meshlet.list_evidence_scoped(limit, parse_safety_profile_arg(&profile)?)?,
+                )?,
+                EvidenceCommand::Show { id, profile } => print_json(
+                    &meshlet.show_evidence_scoped(&id, parse_safety_profile_arg(&profile)?)?,
+                )?,
             }
         }
         Command::Doctor { command } => {

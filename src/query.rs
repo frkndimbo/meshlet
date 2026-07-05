@@ -117,11 +117,19 @@ impl Meshlet {
             "tasks": self.list_tasks_scoped(limit, profile)?,
             "graph": {
                 "nodes": {
-                    "items": nodes.items.into_iter().map(compact_node).collect::<Vec<_>>(),
+                    "items": nodes
+                        .items
+                        .into_iter()
+                        .map(|node| compact_node_for_profile(node, profile))
+                        .collect::<Vec<_>>(),
                     "truncated": nodes.truncated,
                 },
                 "edges": {
-                    "items": edges.items.into_iter().map(compact_edge).collect::<Vec<_>>(),
+                    "items": edges
+                        .items
+                        .into_iter()
+                        .map(|edge| compact_edge_for_profile(edge, profile))
+                        .collect::<Vec<_>>(),
                     "truncated": edges.truncated,
                 },
             }
