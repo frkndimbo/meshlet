@@ -37,6 +37,8 @@ The event log is the source of truth. Graph, task, mailbox, timeline, evidence, 
 
 ## Quick Start
 
+Requirements: Rust `1.85` or newer. Install Rust from <https://rustup.rs>.
+
 ```bash
 cargo build
 cargo run -- init

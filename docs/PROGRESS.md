@@ -49,11 +49,13 @@ v0.4 - Agent Mailbox.
 - v0.4 release smoke checklist exists in docs/RELEASE_CHECKLIST.md.
 - GitHub publication metadata and repository hygiene notes exist in docs/GITHUB_PUBLICATION.md.
 - Public repository no longer tracks local Codex config or generated Graphify output.
+- Minimum supported Rust version is `1.85`.
 - Ponytail is installed and enabled in the local Codex plugin registry as a simplicity/over-engineering guard. Project rules keep it subordinate to Meshlet safety, scope, architecture, and verification gates.
 - Local tool baselines: Graphify CLI/skill 0.9.1, Ponytail plugin 4.8.4, RTK 0.43.0.
 
 ## Last Verified
 
+- 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` passed after documenting MSRV `1.85` in Cargo and README. Test result: 85 passed.
 - 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` passed after splitting compact/public-safe/OKF helpers out of `src/lib.rs`. Test result: 85 passed.
 - 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check`, `rtk cargo test --test public_safe_boundary -- --nocapture`, `rtk cargo test`, `rtk cargo build`, and fresh release smoke passed after public-safe evidence projection hardening. Test result: 85 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after behavior-preserving `src/lib.rs` module split. Test result: 74 passed.
