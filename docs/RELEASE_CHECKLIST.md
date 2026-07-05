@@ -35,6 +35,12 @@ rtk run 'cd /tmp/meshlet-v04-smoke && ./meshlet event append --type context.adde
 rtk run 'cd /tmp/meshlet-v04-smoke && ./meshlet verify'
 ```
 
+- [ ] Append public evidence with a local path:
+
+```bash
+rtk run 'cd /tmp/meshlet-v04-smoke && echo "dummy public evidence" > evidence.txt && ./meshlet event append --type evidence.attached --visibility public --profile public-safe --json "{\"path\":\"/tmp/meshlet-v04-smoke/evidence.txt\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"'
+```
+
 - [ ] Verify public doctor:
 
 ```bash
@@ -59,6 +65,12 @@ rtk run 'cd /tmp/meshlet-v04-smoke && ./meshlet export public --format okf --out
 
 ```bash
 rtk run 'grep -R "public-needle-v04" /tmp/meshlet-v04-smoke/public.json /tmp/meshlet-v04-smoke/okf && ! grep -R "private-needle-v04" /tmp/meshlet-v04-smoke/public.json /tmp/meshlet-v04-smoke/okf'
+```
+
+- [ ] Confirm public evidence exports omit the local path:
+
+```bash
+rtk run '! grep -R "/tmp/meshlet-v04-smoke/evidence.txt" /tmp/meshlet-v04-smoke/public.json /tmp/meshlet-v04-smoke/okf'
 ```
 
 ## MCP Public-Safe Smoke

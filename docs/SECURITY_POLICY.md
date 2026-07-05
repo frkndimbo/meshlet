@@ -21,6 +21,7 @@
 - Public-safe task and timeline reads must replay only public task/message/evidence events.
 - Public-safe mailbox reads must return only public messages.
 - Public export must omit message bodies and raw message attrs.
+- Public-safe evidence and file graph projections must never expose raw attrs, local paths, refs, notes, path-derived labels, or path-derived file IDs.
 - Full/raw output mode is local-trusted only.
 
 ## Local State

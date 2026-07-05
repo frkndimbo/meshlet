@@ -32,6 +32,7 @@ v0.4 - Agent Mailbox.
 - Public-safe task reads replay only public task events, so private/local task metadata is not exposed by digest, task tools, or task resources.
 - Evidence can support tasks through graph edges.
 - Evidence attach can compute SHA-256 digests, and evidence verify can compare stored digest with current file contents.
+- Public-safe evidence reads use a compact whitelist projection and do not expose raw graph attrs, local paths, notes, or path-derived file node IDs.
 - Events have `private`, `local`, or `public` visibility.
 - Public-safe query/digest/export paths use compact output and filter private/local state.
 - Full public export rewrite through dedicated public-safe views/queries remains deferred.
@@ -52,6 +53,7 @@ v0.4 - Agent Mailbox.
 
 ## Last Verified
 
+- 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check`, `rtk cargo test --test public_safe_boundary -- --nocapture`, `rtk cargo test`, `rtk cargo build`, and fresh release smoke passed after public-safe evidence projection hardening. Test result: 85 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after behavior-preserving `src/lib.rs` module split. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after removing tracked local Codex config and generated Graphify output. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after README/publication hygiene refinement. Test result: 74 passed.
@@ -84,7 +86,7 @@ v0.4 - Agent Mailbox.
 
 1. Rerun the v0.4 release smoke checklist from the final release commit before tagging.
 2. Tag `v0.4.0` from clean `PUSAT` after release checks pass.
-3. Design the blob/CCR metadata table and retrieve-by-hash flow after v0.4 release hardening closes.
+3. Start v0.4.1 adoption hardening after the tag: branding cleanup, install docs, binary release workflow, event schema docs, and public-safe contract docs.
 
 ## Maintenance Rules
 

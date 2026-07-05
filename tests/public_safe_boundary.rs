@@ -255,6 +255,142 @@ fn public_safe_evidence_does_not_emit_path_or_secret_attrs() -> Result<()> {
 }
 
 #[test]
+fn public_safe_evidence_list_does_not_emit_attrs_json() -> Result<()> {
+    let dir = tempdir()?;
+    let meshlet = Meshlet::init(dir.path())?;
+    let path_sentinel = dir
+        .path()
+        .join("PR1_EVIDENCE_ATTRS_PATH_SENTINEL.txt")
+        .display()
+        .to_string();
+
+    meshlet.append_event_with_options(
+        "evidence.attached",
+        "test:public-boundary",
+        json!({
+            "path": path_sentinel,
+            "sha256": "2".repeat(64)
+        }),
+        EventVisibility::Public,
+        SafetyProfile::LocalTrusted,
+    )?;
+
+    let evidence = meshlet.list_evidence_scoped(20, SafetyProfile::PublicSafe)?;
+    assert_eq!(evidence.len(), 1);
+    assert!(
+        evidence[0].get("attrs").is_none(),
+        "public-safe evidence must not emit raw attrs: {}",
+        serialize(&evidence)
+    );
+    assert_eq!(
+        evidence[0].get("has_path").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        evidence[0].get("sha256").and_then(Value::as_str),
+        Some("2222222222222222222222222222222222222222222222222222222222222222")
+    );
+    Ok(())
+}
+
+#[test]
+fn public_safe_show_evidence_does_not_emit_path_note_or_secret() -> Result<()> {
+    let dir = tempdir()?;
+    let meshlet = Meshlet::init(dir.path())?;
+    let path_sentinel = dir
+        .path()
+        .join("PR1_EVIDENCE_SHOW_PATH_SENTINEL.txt")
+        .display()
+        .to_string();
+    let attr_sentinel = "Bearer PR1_EVIDENCE_SHOW_SECRET_SENTINEL_73bc";
+    let sentinels = [path_sentinel.as_str(), attr_sentinel];
+
+    let event = meshlet.append_event_with_options(
+        "evidence.attached",
+        "test:public-boundary",
+        json!({
+            "path": path_sentinel,
+            "sha256": "3".repeat(64),
+            "note": attr_sentinel
+        }),
+        EventVisibility::Public,
+        SafetyProfile::LocalTrusted,
+    )?;
+
+    let evidence = meshlet.show_evidence_scoped(&event.id, SafetyProfile::PublicSafe)?;
+    let output = serialize(&evidence);
+    assert_no_forbidden_sentinels(&output, &sentinels);
+    assert!(
+        evidence.get("attrs").is_none(),
+        "public-safe evidence show must not emit raw attrs: {output}"
+    );
+    assert_eq!(
+        evidence.get("has_path").and_then(Value::as_bool),
+        Some(true)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_safe_okf_evidence_export_does_not_emit_absolute_path() -> Result<()> {
+    let dir = tempdir()?;
+    let meshlet = Meshlet::init(dir.path())?;
+    let path_sentinel = dir
+        .path()
+        .join("PR1_EVIDENCE_OKF_PATH_SENTINEL.txt")
+        .display()
+        .to_string();
+    let sentinels = [path_sentinel.as_str()];
+
+    meshlet.append_event_with_options(
+        "evidence.attached",
+        "test:public-boundary",
+        json!({
+            "path": path_sentinel,
+            "sha256": "4".repeat(64)
+        }),
+        EventVisibility::Public,
+        SafetyProfile::LocalTrusted,
+    )?;
+
+    let out_dir = dir.path().join("okf-evidence-public");
+    meshlet.public_export_okf(&out_dir, 20)?;
+    let output = fs::read_dir(out_dir.join("evidence"))?
+        .map(|entry| fs::read_to_string(entry?.path()))
+        .collect::<Result<Vec<_>, std::io::Error>>()?
+        .join("\n");
+    assert_no_forbidden_sentinels(&output, &sentinels);
+    Ok(())
+}
+
+#[test]
+fn public_safe_graph_file_nodes_do_not_emit_absolute_path() -> Result<()> {
+    let dir = tempdir()?;
+    let meshlet = Meshlet::init(dir.path())?;
+    let path_sentinel = dir
+        .path()
+        .join("PR1_GRAPH_FILE_PATH_SENTINEL.txt")
+        .display()
+        .to_string();
+    let sentinels = [path_sentinel.as_str()];
+
+    meshlet.append_event_with_options(
+        "evidence.attached",
+        "test:public-boundary",
+        json!({
+            "path": path_sentinel,
+            "sha256": "5".repeat(64)
+        }),
+        EventVisibility::Public,
+        SafetyProfile::LocalTrusted,
+    )?;
+
+    let digest = meshlet.context_digest_limited(20, SafetyProfile::PublicSafe)?;
+    assert_no_forbidden_sentinels(&serialize(&digest), &sentinels);
+    Ok(())
+}
+
+#[test]
 fn mixed_visibility_public_surfaces_only_safe_public_projection() -> Result<()> {
     let dir = tempdir()?;
     let meshlet = Meshlet::init(dir.path())?;
