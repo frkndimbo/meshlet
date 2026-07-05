@@ -7,7 +7,7 @@ v0.4 - Agent Mailbox.
 ## Current State
 
 - Rust CLI crate exists.
-- Core library implementation is split across focused modules under `src/` while `src/lib.rs` keeps public types, constants, shared helpers, and tests.
+- Core library implementation is split across focused modules under `src/` while `src/lib.rs` keeps public types, constants, CLI parse helpers, shared validation/row helpers, and integration tests.
 - SQLite event log exists under `.meshlet/` after `meshlet init`.
 - Events include `repo.initialized`, `skill.added`, `context.added`, `agent.message`, `evidence.attached`, `task.created`, `task.updated`, and `graph.imported`.
 - Event hash chains can be verified with `meshlet verify`.
@@ -32,7 +32,7 @@ v0.4 - Agent Mailbox.
 - Public-safe task reads replay only public task events, so private/local task metadata is not exposed by digest, task tools, or task resources.
 - Evidence can support tasks through graph edges.
 - Evidence attach can compute SHA-256 digests, and evidence verify can compare stored digest with current file contents.
-- Public-safe evidence reads use a compact whitelist projection and do not expose raw graph attrs, local paths, notes, or path-derived file node IDs.
+- Public-safe projection helpers are isolated in `src/public_safe.rs`; evidence reads use a compact whitelist projection and do not expose raw graph attrs, local paths, notes, or path-derived file node IDs.
 - Events have `private`, `local`, or `public` visibility.
 - Public-safe query/digest/export paths use compact output and filter private/local state.
 - Full public export rewrite through dedicated public-safe views/queries remains deferred.
@@ -41,6 +41,7 @@ v0.4 - Agent Mailbox.
 - `meshlet export public` writes a compact sanitized public bundle with public events, tasks, mailbox message envelopes, timelines, and graph data.
 - `meshlet export public --format okf` writes a public-safe OKF markdown bundle with contexts, tasks, message envelopes, skills, evidence, event log, and compact task timelines.
 - `meshlet okf doctor` checks OKF concept frontmatter and local markdown links.
+- Compact output shaping lives in `src/compact.rs`; OKF markdown helper logic lives in `src/okf.rs`.
 - MCP stdio skeleton supports initialize, tools/list, tools/call, resources/list, and resources/read.
 - Tests cover init, hash chaining, chain verification, secret-key rejection, public-safe value rejection, visibility-filtered compact query, context materialization, deterministic context and FTS rebuilds, v2-to-v3 context migration, graph/skill SQL visibility materialization, v3-to-v4 migration, v4-to-v5 FTS migration, v5-to-v6 task/mailbox read-model creation, FTS-backed events/contexts/graph/skills search, public-safe FTS limit regression, public-safe task filtering, public doctor/export coverage, OKF message/timeline export, skill materialization and validation, deterministic query, graph imports, graph rebuild determinism, namespace filtering, task/evidence/mailbox/timeline views, evidence digest verification, bounded context, and direct MCP behavior for initialize, tools, resources, v0.4 task/mailbox/timeline tools, public-safe guards, and invalid tool params.
 - Agent docs and policy docs exist: AGENTS.md, README.md, docs/SCOPE.md, docs/MCP_POLICY.md, docs/SKILL_POLICY.md, docs/SECURITY_POLICY.md, docs/GRAPH_POLICY.md.
@@ -53,6 +54,7 @@ v0.4 - Agent Mailbox.
 
 ## Last Verified
 
+- 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` passed after splitting compact/public-safe/OKF helpers out of `src/lib.rs`. Test result: 85 passed.
 - 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check`, `rtk cargo test --test public_safe_boundary -- --nocapture`, `rtk cargo test`, `rtk cargo build`, and fresh release smoke passed after public-safe evidence projection hardening. Test result: 85 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after behavior-preserving `src/lib.rs` module split. Test result: 74 passed.
 - 2026-07-04: `rtk cargo fmt --check`, `rtk cargo check`, and `rtk cargo test` passed after removing tracked local Codex config and generated Graphify output. Test result: 74 passed.

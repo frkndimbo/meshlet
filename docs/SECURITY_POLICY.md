@@ -22,6 +22,7 @@
 - Public-safe mailbox reads must return only public messages.
 - Public export must omit message bodies and raw message attrs.
 - Public-safe evidence and file graph projections must never expose raw attrs, local paths, refs, notes, path-derived labels, or path-derived file IDs.
+- Public-safe projection helpers must remain whitelist-only and isolated from local-trusted compact output helpers.
 - Full/raw output mode is local-trusted only.
 
 ## Local State
