@@ -1,5 +1,7 @@
 # Graph Policy
 
+See `docs/EVENT_SCHEMA.md` for event payload rules and `docs/PUBLIC_SAFE_CONTRACT.md` for public-safe graph projection rules.
+
 ## Source of Truth
 
 The event log is the source of truth. The context graph is a materialized view and must be rebuildable from events.

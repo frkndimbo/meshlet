@@ -1,5 +1,7 @@
 # Security Policy
 
+See `docs/PUBLIC_SAFE_CONTRACT.md` for the compact public sharing contract.
+
 ## Secrets
 
 - Do not store secrets in event payloads.

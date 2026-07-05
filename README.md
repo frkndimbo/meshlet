@@ -16,11 +16,12 @@ The event log is the source of truth. Graph, task, mailbox, timeline, evidence, 
 
 ## Current Status
 
-- Version: `0.4.0`
+- Package version: `0.4.0`
+- Current target: private `v0.4.1` adoption hardening
 - Runtime: local CLI + MCP stdio
 - Storage: SQLite under `.meshlet/`
 - Safety model: `private`, `local`, and `public` event visibility
-- Release state: v0.4 release hardening / first GitHub release candidate
+- Release state: public `v0.4.0` tag/release is intentionally skipped while the repository is private and GitHub Actions is blocked before runner startup
 
 ## Features
 
@@ -38,6 +39,7 @@ The event log is the source of truth. Graph, task, mailbox, timeline, evidence, 
 ## Quick Start
 
 Requirements: Rust `1.85` or newer. Install Rust from <https://rustup.rs>.
+See `docs/INSTALL.md` for maintainer workflow, local state, and install notes.
 
 ```bash
 cargo build
@@ -97,11 +99,12 @@ Local runtime state, SQLite files, logs, private evidence, and generated exports
 
 ```bash
 cargo fmt --check
-cargo check
-cargo test
+cargo check --locked
+cargo build --locked
+cargo test --locked
 ```
 
-The v0.4 release checklist is in `docs/RELEASE_CHECKLIST.md`.
+Local maintainers in this repository run the same gates through `rtk`; see `docs/INSTALL.md`.
 
 ## v0.4 Scope
 
@@ -128,6 +131,9 @@ These are intentionally out of scope for v0.4:
 
 ## Documentation
 
+- `docs/INSTALL.md` - build, run, install, and local-state notes.
+- `docs/EVENT_SCHEMA.md` - event envelope, event types, payload rules, and read-model derivation.
+- `docs/PUBLIC_SAFE_CONTRACT.md` - public-safe read/export/MCP contract.
 - `docs/SCOPE.md` - phase boundaries.
 - `docs/PROGRESS.md` - current state and next tasks.
 - `docs/MCP_POLICY.md` - MCP behavior rules.

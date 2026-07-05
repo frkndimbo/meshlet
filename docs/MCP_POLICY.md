@@ -1,5 +1,7 @@
 # MCP Policy
 
+See `docs/PUBLIC_SAFE_CONTRACT.md` for the public-safe sharing boundary across MCP, CLI, and exports.
+
 ## v0.1 Transport
 
 - Support MCP over stdio only.
