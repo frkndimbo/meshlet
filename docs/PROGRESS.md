@@ -50,14 +50,15 @@ v0.4 - Agent Mailbox.
 - OKF policy docs exist in docs/OKF_POLICY.md.
 - v0.4 release smoke checklist exists in docs/RELEASE_CHECKLIST.md.
 - GitHub publication metadata and repository hygiene notes exist in docs/GITHUB_PUBLICATION.md.
-- Public `v0.4.0` release tagging is intentionally skipped while the repository is moved private and GitHub Actions remains blocked by an account-level billing-lock state.
-- Public repository no longer tracks local Codex config or generated Graphify output.
+- Repository is private; public `v0.4.0` release tagging is intentionally skipped while GitHub Actions remains blocked by an account-level billing-lock state.
+- Repository no longer tracks local Codex config or generated Graphify output.
 - Minimum supported Rust version is `1.85`.
 - Ponytail is installed and enabled in the local Codex plugin registry as a simplicity/over-engineering guard. Project rules keep it subordinate to Meshlet safety, scope, architecture, and verification gates.
 - Local tool baselines: Graphify CLI/skill 0.9.1, Ponytail plugin 4.8.4, RTK 0.43.0.
 
 ## Last Verified
 
+- 2026-07-05: Repository visibility is private and PR #5 was merged into `PUSAT` as merge commit `1bcde791a77ed32a093ca082bcb04a528250a8df`. Local `PUSAT` was fast-forwarded to `origin/PUSAT`. With GitHub Actions still blocked before runner startup, local private-trunk verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked`. Test result: 88 passed.
 - 2026-07-05: Public `v0.4.0` release is intentionally skipped before tagging/publishing. PR #5 remains open with the reversible workflow dispatch/docs change, but GitHub Actions still fails before runner startup with `steps: []` and the annotation "The job was not started because your account is locked due to a billing issue." The next operating posture is private-repo use until the account-level Actions blocker is cleared.
 - 2026-07-05: CI recovery diagnosis found latest `PUSAT` run `28735853418` failed before any steps ran: job `quality` had `steps: []`, `runner_id: 0`, and a public GitHub annotation stating "The job was not started because your account is locked due to a billing issue." Added `workflow_dispatch` to the Rust workflow for manual reruns after the account-level billing blocker is cleared. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked`. Test result: 88 passed. Release tag `v0.4.0` is still blocked until `PUSAT` CI is genuinely green.
 - 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` passed after adding contributor docs and a bug-report issue template. Test result: 88 passed.
@@ -95,9 +96,9 @@ v0.4 - Agent Mailbox.
 
 ## Next 3 Tasks
 
-1. Move the repository private before any `v0.4.0` tag or GitHub Release is created.
-2. Keep PR #5 open or merge it only after deciding how private-repo CI should be handled while the account-level Actions blocker persists.
-3. Resume release work only if the repo is made public again and `PUSAT` CI executes real `Format`, `Check`, `Build`, and `Test` steps successfully.
+1. Use local private-trunk gates (`fmt`, `check --locked`, `build --locked`, `test --locked`) as the required verification path while GitHub Actions is blocked.
+2. Start private v0.4.1 adoption hardening: branding cleanup, install docs, event schema docs, and public-safe contract docs.
+3. Defer binary release workflow and any public `v0.4.0` tag/GitHub Release until Actions can execute real `Format`, `Check`, `Build`, and `Test` steps.
 
 ## Maintenance Rules
 
