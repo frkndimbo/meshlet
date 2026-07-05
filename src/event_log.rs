@@ -282,3 +282,183 @@ impl Meshlet {
         Ok(records)
     }
 }
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestCaseError};
+    use tempfile::tempdir;
+
+    fn must<T, E: std::fmt::Display>(
+        result: std::result::Result<T, E>,
+    ) -> std::result::Result<T, TestCaseError> {
+        result.map_err(|error| TestCaseError::fail(error.to_string()))
+    }
+
+    fn generated_events() -> impl Strategy<Value = Vec<(u16, u8)>> {
+        prop::collection::vec((0u16..4096, 0u8..3), 1..16)
+    }
+
+    fn visibility_from_seed(seed: u8) -> EventVisibility {
+        match seed % 3 {
+            0 => EventVisibility::Private,
+            1 => EventVisibility::Local,
+            _ => EventVisibility::Public,
+        }
+    }
+
+    fn append_generated_events(
+        meshlet: &Meshlet,
+        events: &[(u16, u8)],
+    ) -> std::result::Result<(), TestCaseError> {
+        for (index, (label_seed, visibility_seed)) in events.iter().enumerate() {
+            must(meshlet.append_event_with_options(
+                "context.added",
+                &format!("agent:{index}"),
+                json!({"label": format!("event-{index}-{label_seed}")}),
+                visibility_from_seed(*visibility_seed),
+                SafetyProfile::LocalTrusted,
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn stored_event_count(meshlet: &Meshlet) -> std::result::Result<i64, TestCaseError> {
+        must(
+            meshlet
+                .conn
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0)),
+        )
+    }
+
+    fn mutate_event_field(
+        meshlet: &Meshlet,
+        seq: i64,
+        field: u8,
+    ) -> std::result::Result<(), TestCaseError> {
+        match field % 5 {
+            0 => {
+                let payload = json!({"label": "tampered", "seq": seq}).to_string();
+                must(meshlet.conn.execute(
+                    "UPDATE events SET payload_json = ?1 WHERE seq = ?2",
+                    params![payload, seq],
+                ))?;
+            }
+            1 => {
+                let visibility: String = must(meshlet.conn.query_row(
+                    "SELECT visibility FROM events WHERE seq = ?1",
+                    [seq],
+                    |row| row.get(0),
+                ))?;
+                let replacement = if visibility == "public" {
+                    "private"
+                } else {
+                    "public"
+                };
+                must(meshlet.conn.execute(
+                    "UPDATE events SET visibility = ?1 WHERE seq = ?2",
+                    params![replacement, seq],
+                ))?;
+            }
+            2 => {
+                must(meshlet.conn.execute(
+                    "UPDATE events SET actor = ?1 WHERE seq = ?2",
+                    params!["agent:tampered", seq],
+                ))?;
+            }
+            3 => {
+                must(meshlet.conn.execute(
+                    "UPDATE events SET type = ?1 WHERE seq = ?2",
+                    params!["tampered.event", seq],
+                ))?;
+            }
+            _ => {
+                must(meshlet.conn.execute(
+                    "UPDATE events SET prev_hash = ?1 WHERE seq = ?2",
+                    params!["tampered-prev-hash", seq],
+                ))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn swap_adjacent_events(
+        meshlet: &Meshlet,
+        first_seq: i64,
+    ) -> std::result::Result<(), TestCaseError> {
+        let second_seq = first_seq + 1;
+        must(
+            meshlet
+                .conn
+                .execute("UPDATE events SET seq = -1 WHERE seq = ?1", [first_seq]),
+        )?;
+        must(meshlet.conn.execute(
+            "UPDATE events SET seq = ?1 WHERE seq = ?2",
+            params![first_seq, second_seq],
+        ))?;
+        must(
+            meshlet
+                .conn
+                .execute("UPDATE events SET seq = ?1 WHERE seq = -1", [second_seq]),
+        )?;
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(Config::with_cases(64))]
+
+        #[test]
+        fn randomized_appends_keep_hash_chain_valid(events in generated_events()) {
+            let dir = must(tempdir())?;
+            let meshlet = must(Meshlet::init(dir.path()))?;
+            append_generated_events(&meshlet, &events)?;
+
+            let report = must(meshlet.verify_event_chain())?;
+
+            prop_assert!(report.ok);
+            prop_assert_eq!(report.events, events.len() as u64 + 1);
+        }
+
+        #[test]
+        fn mutating_any_single_event_field_breaks_hash_chain(
+            events in generated_events(),
+            seq_selector in 0usize..128,
+            field in 0u8..5,
+        ) {
+            let dir = must(tempdir())?;
+            let meshlet = must(Meshlet::init(dir.path()))?;
+            append_generated_events(&meshlet, &events)?;
+            let count = stored_event_count(&meshlet)?;
+            let seq = (seq_selector % count as usize) as i64 + 1;
+
+            mutate_event_field(&meshlet, seq, field)?;
+            let report = must(meshlet.verify_event_chain())?;
+
+            prop_assert!(
+                !report.ok,
+                "field mutation {field} at seq {seq} unexpectedly verified"
+            );
+        }
+
+        #[test]
+        fn swapping_adjacent_events_breaks_hash_chain(
+            events in generated_events(),
+            seq_selector in 0usize..128,
+        ) {
+            let dir = must(tempdir())?;
+            let meshlet = must(Meshlet::init(dir.path()))?;
+            append_generated_events(&meshlet, &events)?;
+            let count = stored_event_count(&meshlet)?;
+            let first_seq = (seq_selector % (count as usize - 1)) as i64 + 1;
+
+            swap_adjacent_events(&meshlet, first_seq)?;
+            let report = must(meshlet.verify_event_chain())?;
+
+            prop_assert!(
+                !report.ok,
+                "adjacent event swap at seq {first_seq} unexpectedly verified"
+            );
+        }
+    }
+}
