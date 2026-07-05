@@ -5,6 +5,7 @@ on:
     branches: [ "PUSAT" ]
   pull_request:
     branches: [ "PUSAT" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

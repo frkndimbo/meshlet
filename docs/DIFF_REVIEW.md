@@ -1,21 +1,22 @@
-# Diff Review: src/lib.rs Helper Split
+# Diff Review: CI Workflow Recovery
 
 ## Reviewed
 
-- `src/lib.rs` now declares helper modules and keeps public core types, CLI parse helpers, validation helpers, row mappers, and integration tests.
-- `src/compact.rs` contains compact output helpers and keeps public-safe routing through `src/public_safe.rs`.
-- `src/public_safe.rs` contains the public-safe evidence/file/endpoint whitelist projections.
-- `src/okf.rs` contains the OKF document type and markdown helper functions used by `src/public_export.rs`.
-- Crate-root `pub(crate) use` re-exports keep existing internal call sites stable.
+- `.github/workflows/rust.yml` keeps the existing `push` and `pull_request` triggers for `PUSAT`.
+- `.github/workflows/rust.yml` now includes `workflow_dispatch` so the same Rust quality gate can be rerun manually after the account-level blocker is cleared.
+- `docs/SPEC_DESIGN.md` and `docs/EVAL_DESIGN.md` describe the CI recovery scope, verification, and release gate.
+- `docs/PROGRESS.md` records the CI diagnosis and local verification.
 
 ## Verification
 
 - `rtk cargo fmt --check`
 - `rtk cargo check --locked`
 - `rtk cargo build --locked`
-- `rtk cargo test --locked` - 85 passed
-- `rtk cargo clippy --all-targets -- -D warnings` - moved-code lint fixed; remaining failures are pre-existing unrelated lints in `src/graph.rs`, `src/mailbox.rs`, `src/tasks.rs`, and unchanged `src/lib.rs` code.
+- `rtk cargo test --locked` - 88 passed
+- `rtk proxy gh run view 28735853418 --json databaseId,status,conclusion,event,headBranch,headSha,workflowName,createdAt,updatedAt,jobs` showed job `quality` with `steps: []`, `runner_id: 0`, and 3s runtime.
+- Public GitHub job-page annotation showed: "The job was not started because your account is locked due to a billing issue."
+- Repository Actions permission API checks returned HTTP 401/403 without admin auth, so no account-level settings were changed.
 
 ## Result
 
-Behavior-preserving helper split. No schema, dependency, CLI, MCP, public-safe projection semantics, or public export format changes.
+In-repo workflow recovery is limited to adding a manual dispatch trigger. Release tagging remains blocked until the GitHub account billing lock is resolved and `PUSAT` CI runs real `Format`, `Check`, `Build`, and `Test` steps successfully.
