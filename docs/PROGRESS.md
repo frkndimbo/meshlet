@@ -57,6 +57,7 @@ v0.4 - Agent Mailbox.
 
 ## Last Verified
 
+- 2026-07-05: CI recovery diagnosis found latest `PUSAT` run `28735853418` failed before any steps ran: job `quality` had `steps: []`, `runner_id: 0`, and a public GitHub annotation stating "The job was not started because your account is locked due to a billing issue." Added `workflow_dispatch` to the Rust workflow for manual reruns after the account-level billing blocker is cleared. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked`. Test result: 88 passed. Release tag `v0.4.0` is still blocked until `PUSAT` CI is genuinely green.
 - 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` passed after adding contributor docs and a bug-report issue template. Test result: 88 passed.
 - 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` passed after adding proptest hash-chain integrity coverage. Test result: 88 passed.
 - 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` passed after documenting MSRV `1.85` in Cargo and README. Test result: 85 passed.
