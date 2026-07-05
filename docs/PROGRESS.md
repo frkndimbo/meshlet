@@ -46,6 +46,7 @@ v0.4 - Agent Mailbox.
 - Tests cover init, hash chaining, chain verification, secret-key rejection, public-safe value rejection, visibility-filtered compact query, context materialization, deterministic context and FTS rebuilds, v2-to-v3 context migration, graph/skill SQL visibility materialization, v3-to-v4 migration, v4-to-v5 FTS migration, v5-to-v6 task/mailbox read-model creation, FTS-backed events/contexts/graph/skills search, public-safe FTS limit regression, public-safe task filtering, public doctor/export coverage, OKF message/timeline export, skill materialization and validation, deterministic query, graph imports, graph rebuild determinism, namespace filtering, task/evidence/mailbox/timeline views, evidence digest verification, bounded context, and direct MCP behavior for initialize, tools, resources, v0.4 task/mailbox/timeline tools, public-safe guards, and invalid tool params.
 - Property tests cover randomized hash-chain appends, single-field event tampering, and adjacent event reordering.
 - Agent docs and policy docs exist: AGENTS.md, README.md, docs/SCOPE.md, docs/MCP_POLICY.md, docs/SKILL_POLICY.md, docs/SECURITY_POLICY.md, docs/GRAPH_POLICY.md.
+- Contributor docs and a GitHub bug-report template exist: CONTRIBUTING.md and `.github/ISSUE_TEMPLATE/bug_report.yml`.
 - OKF policy docs exist in docs/OKF_POLICY.md.
 - v0.4 release smoke checklist exists in docs/RELEASE_CHECKLIST.md.
 - GitHub publication metadata and repository hygiene notes exist in docs/GITHUB_PUBLICATION.md.
@@ -56,6 +57,7 @@ v0.4 - Agent Mailbox.
 
 ## Last Verified
 
+- 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` passed after adding contributor docs and a bug-report issue template. Test result: 88 passed.
 - 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` passed after adding proptest hash-chain integrity coverage. Test result: 88 passed.
 - 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` passed after documenting MSRV `1.85` in Cargo and README. Test result: 85 passed.
 - 2026-07-05: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` passed after splitting compact/public-safe/OKF helpers out of `src/lib.rs`. Test result: 85 passed.
