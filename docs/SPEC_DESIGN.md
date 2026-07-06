@@ -1,24 +1,25 @@
-# Spec Design: CI Workflow Recovery
+# Spec Design: Public OKF Limit Fix
 
 ## Objective
 
-Recover GitHub Actions visibility for the v0.4 release gate without changing Meshlet runtime behavior.
+Fix the public-safe OKF export limit path so visibility filtering happens before `LIMIT`.
 
 ## Changes
 
-- Diagnose the zero-step GitHub Actions failures from current run metadata and public job annotations.
-- Add `workflow_dispatch` to `.github/workflows/rust.yml` so CI can be manually rerun after the account-level blocker is cleared.
-- Record the CI blocker and verification status in project docs.
+- Use the existing scoped event reader in OKF export instead of filtering after a local-trusted event limit.
+- Keep the fix narrow: no schema, MCP, CLI, dependency, or export-format changes.
+- Add a regression test for a newer private event hiding an older public event at `limit=1`.
+- Apply minimal clippy cleanup only where it keeps the code simpler.
 
 ## Boundaries
 
-- Do not change Rust source, Cargo metadata, database schema, public export behavior, MCP behavior, or Meshlet scope.
-- Do not change repository/account Actions permissions without explicit human confirmation.
-- Do not tag or publish `v0.4.0` until CI is verifiably green on `PUSAT`.
-- Do not start v0.4.1 adoption-hardening work.
+- Do not broaden v0.4 scope.
+- Do not change Cargo metadata, SQLite schema, MCP wire shape, CLI args, or OKF document format.
+- Do not refactor inline tests, batch timelines, or introduce request structs unless required by verification.
+- Preserve unrelated pre-existing working-tree edits.
 
 ## Success Criteria
 
-- `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked` pass.
-- A fresh CI run can be manually dispatched after the account-level blocker is resolved.
-- A `PUSAT` CI run shows real `Format`, `Check`, `Build`, and `Test` steps before release tagging proceeds.
+- OKF public export returns the older public event even when a newer private event exists and `limit=1`.
+- Public-safe output remains compact and public-only.
+- `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo test --locked`, and `rtk cargo clippy --all-targets --all-features -- -D warnings` pass.

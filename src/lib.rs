@@ -79,18 +79,13 @@ const SECRET_VALUE_MARKERS: &[&str] = &[
     "sk-",
 ];
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EventVisibility {
+    #[default]
     Private,
     Local,
     Public,
-}
-
-impl Default for EventVisibility {
-    fn default() -> Self {
-        Self::Private
-    }
 }
 
 impl EventVisibility {
@@ -124,17 +119,12 @@ impl FromStr for EventVisibility {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputMode {
+    #[default]
     Compact,
     Full,
-}
-
-impl Default for OutputMode {
-    fn default() -> Self {
-        Self::Compact
-    }
 }
 
 impl FromStr for OutputMode {
@@ -149,17 +139,12 @@ impl FromStr for OutputMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SafetyProfile {
+    #[default]
     LocalTrusted,
     PublicSafe,
-}
-
-impl Default for SafetyProfile {
-    fn default() -> Self {
-        Self::LocalTrusted
-    }
 }
 
 impl SafetyProfile {
@@ -2095,6 +2080,35 @@ mod tests {
         assert!(!bundle.contains("Private OKF handoff"));
         assert!(!bundle.contains("private OKF body omitted"));
         assert!(!bundle.contains("private note"));
+        Ok(())
+    }
+
+    #[test]
+    fn public_okf_export_filters_events_before_limit() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:public",
+            json!({"title": "Older Public", "summary": "public note"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:private",
+            json!({"title": "Newer Private", "summary": "private note"}),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        let out = dir.path().join("okf");
+
+        let export = meshlet.public_export_okf(&out, 1)?;
+        let log = fs::read_to_string(out.join("log.md"))?;
+
+        assert_eq!(export["events"], 1);
+        assert!(log.contains("agent:public"));
+        assert!(!log.contains("agent:private"));
         Ok(())
     }
 

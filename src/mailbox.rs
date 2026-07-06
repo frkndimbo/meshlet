@@ -1,6 +1,8 @@
 use super::*;
 
 impl Meshlet {
+    // ponytail: public CLI/MCP facade mirrors user-facing fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn send_agent_message(
         &self,
         from_agent: &str,

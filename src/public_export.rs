@@ -66,10 +66,8 @@ impl Meshlet {
         require_public_doctor_ok(&public_report)?;
         prepare_okf_output_dir(out_dir)?;
         let events = self
-            .list_events(limit)?
-            .into_iter()
-            .filter(|event| event.visibility == EventVisibility::Public)
-            .collect::<Vec<_>>();
+            .list_events_bounded_scoped(limit, SafetyProfile::PublicSafe)?
+            .items;
         let contexts = self.list_contexts_limited(limit, SafetyProfile::PublicSafe)?;
         let tasks = self.list_tasks_scoped(limit, SafetyProfile::PublicSafe)?;
         let skills = self.list_skills_scoped(SafetyProfile::PublicSafe)?;

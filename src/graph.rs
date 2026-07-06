@@ -354,6 +354,8 @@ impl Meshlet {
         Ok(())
     }
 
+    // ponytail: keep the call sites flat; a request struct is more churn than value here.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn upsert_edge(
         &self,
         id: &str,

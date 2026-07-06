@@ -93,6 +93,8 @@ impl Meshlet {
         })
     }
 
+    // ponytail: public CLI/MCP facade mirrors user-facing fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_task(
         &self,
         task_id: Option<&str>,
