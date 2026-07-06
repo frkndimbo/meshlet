@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 mod compact;
+pub mod config;
 mod event_log;
 mod evidence;
 mod graph;

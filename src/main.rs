@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use meshlet::{
-    DEFAULT_LIMIT, Meshlet, OutputMode, find_project_root, parse_json_arg, parse_output_mode_arg,
-    parse_safety_profile_arg, parse_visibility_arg, run_mcp_stdio_with_profile,
+    DEFAULT_LIMIT, Meshlet, OutputMode,
+    config::{AdoptOptions, adopt_project},
+    find_project_root, parse_json_arg, parse_output_mode_arg, parse_safety_profile_arg,
+    parse_visibility_arg, run_mcp_stdio_with_profile,
 };
 
 #[derive(Debug, Parser)]
@@ -20,7 +22,18 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Init,
+    Init {
+        #[arg(long)]
+        adopt: bool,
+        #[arg(long, default_value = "codex")]
+        agent: String,
+        #[arg(long, default_value = ".meshlet-okf")]
+        okf: PathBuf,
+        #[arg(long, default_value = "graphify-out")]
+        graphify_out: PathBuf,
+        #[arg(long)]
+        no_patch_agents: bool,
+    },
     Status,
     Verify,
     Query {
@@ -275,16 +288,43 @@ enum EvidenceCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init => {
+        Command::Init {
+            adopt,
+            agent,
+            okf,
+            graphify_out,
+            no_patch_agents,
+        } => {
             let root = std::env::current_dir()?;
+            let state_was_present = root.join(".meshlet").join("meshlet.db").exists();
             let meshlet = Meshlet::init(&root)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "status": "initialized",
-                    "root": meshlet.root(),
-                }))?
-            );
+            if adopt {
+                let options = AdoptOptions::new(agent, okf, graphify_out, !no_patch_agents);
+                let mut report = adopt_project(&root, &options)?;
+                report.record_state_db(state_was_present);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "adopted",
+                        "root": meshlet.root(),
+                        "state": report.state,
+                        "config": report.config,
+                        "okf": report.okf,
+                        "created": report.created,
+                        "patched": report.patched,
+                        "already_present": report.already_present,
+                        "next": report.next,
+                    }))?
+                );
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "initialized",
+                        "root": meshlet.root(),
+                    }))?
+                );
+            }
         }
         Command::Status => {
             let root = find_project_root()?;

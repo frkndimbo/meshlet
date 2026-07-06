@@ -1,17 +1,16 @@
-# Eval Design: v0.4.1 Release Smoke Automation
+# Eval Design: v0.4.1 `init --adopt`
 
 ## Verification
 
 - Run `rtk cargo fmt --check`.
 - Run `rtk cargo check --locked`.
-- Run `rtk cargo build --locked`.
 - Run `rtk cargo test --locked`.
-- Run `rtk cargo clippy --all-targets --all-features -- -D warnings`.
-- Run `rtk run scripts/release_smoke.sh`.
-- Inspect `rtk git diff --stat` and targeted diffs for docs and script changes.
+- Inspect `rtk git diff --stat` and targeted diffs for CLI, config, and docs changes.
 
 ## Risk Focus
 
-- Avoid leaving `/tmp/meshlet-v04-smoke` behind after failures.
-- Avoid leaking private/local markers, local evidence paths, or rejected mutation payloads into public outputs.
-- Avoid changing public runtime behavior while adding maintainer automation.
+- Plain `meshlet init` must preserve its previous JSON and side effects.
+- Adopt JSON must keep stable fields for `state`, `config`, `okf`, `created`, `patched`, `already_present`, and `next`.
+- Adoption file patches must be idempotent and avoid duplicate `.gitignore` or `AGENTS.md` entries.
+- Adoption must not ignore `.meshlet-okf/` by default.
+- Adoption must not modify existing `meshlet.toml` content.

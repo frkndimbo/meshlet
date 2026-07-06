@@ -8,6 +8,8 @@ v0.4.1 - Adoption Hardening.
 
 - Rust CLI crate exists.
 - Core library implementation is split across focused modules under `src/` while `src/lib.rs` keeps public types, constants, CLI parse helpers, shared validation/row helpers, and integration tests.
+- Project config support exists as an inactive library module: optional `meshlet.toml` loads with defaults for storage, Graphify, OKF, and agent adoption settings; existing CLI command behavior is unchanged.
+- `meshlet init --adopt` initializes `.meshlet/`, creates `meshlet.toml` when missing, creates a minimal OKF skeleton, patches `.gitignore`, optionally patches `AGENTS.md`, and returns a stable JSON contract with `state`, `config`, `okf`, `created`, `patched`, `already_present`, and `next`.
 - SQLite event log exists under `.meshlet/` after `meshlet init`.
 - Events include `repo.initialized`, `skill.added`, `context.added`, `agent.message`, `evidence.attached`, `task.created`, `task.updated`, and `graph.imported`.
 - Event hash chains can be verified with `meshlet verify`.
@@ -43,7 +45,7 @@ v0.4.1 - Adoption Hardening.
 - `meshlet okf doctor` checks OKF concept frontmatter and local markdown links.
 - Compact output shaping lives in `src/compact.rs`; OKF markdown helper logic lives in `src/okf.rs`.
 - MCP stdio skeleton supports initialize, tools/list, tools/call, resources/list, and resources/read.
-- Tests cover init, hash chaining, chain verification, secret-key rejection, public-safe value rejection, visibility-filtered compact query, context materialization, deterministic context and FTS rebuilds, v2-to-v3 context migration, graph/skill SQL visibility materialization, v3-to-v4 migration, v4-to-v5 FTS migration, v5-to-v6 task/mailbox read-model creation, FTS-backed events/contexts/graph/skills search, public-safe FTS limit regression, public-safe task filtering, public doctor/export coverage, OKF message/timeline export, skill materialization and validation, deterministic query, graph imports, graph rebuild determinism, namespace filtering, task/evidence/mailbox/timeline views, evidence digest verification, bounded context, and direct MCP behavior for initialize, tools, resources, v0.4 task/mailbox/timeline tools, public-safe guards, and invalid tool params.
+- Tests cover project config defaults/load/fallback, adopt config creation, OKF skeleton creation, `.gitignore` and `AGENTS.md` idempotence, adopt JSON report contract, custom adopt paths, `--no-patch-agents`, plain init behavior, init, hash chaining, chain verification, secret-key rejection, public-safe value rejection, visibility-filtered compact query, context materialization, deterministic context and FTS rebuilds, v2-to-v3 context migration, graph/skill SQL visibility materialization, v3-to-v4 migration, v4-to-v5 FTS migration, v5-to-v6 task/mailbox read-model creation, FTS-backed events/contexts/graph/skills search, public-safe FTS limit regression, public-safe task filtering, public doctor/export coverage, OKF message/timeline export, skill materialization and validation, deterministic query, graph imports, graph rebuild determinism, namespace filtering, task/evidence/mailbox/timeline views, evidence digest verification, bounded context, and direct MCP behavior for initialize, tools, resources, v0.4 task/mailbox/timeline tools, public-safe guards, and invalid tool params.
 - Property tests cover randomized hash-chain appends, single-field event tampering, and adjacent event reordering.
 - Agent docs and policy docs exist: AGENTS.md, README.md, docs/SCOPE.md, docs/MCP_POLICY.md, docs/SKILL_POLICY.md, docs/SECURITY_POLICY.md, docs/GRAPH_POLICY.md.
 - Contributor docs and a GitHub bug-report template exist: CONTRIBUTING.md and `.github/ISSUE_TEMPLATE/bug_report.yml`.
@@ -60,6 +62,9 @@ v0.4.1 - Adoption Hardening.
 
 ## Last Verified
 
+- 2026-07-07: `meshlet init --adopt` JSON output was stabilized with `state`, `config`, `okf`, `created`, `patched`, `already_present`, and `next`; created/already-present paths are now factual per run and OKF directory entries are not reported as files. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, and `rtk cargo test --locked`. Test result: 99 passed.
+- 2026-07-06: `meshlet init --adopt` was added with config creation, OKF skeleton creation, `.gitignore` patching, optional `AGENTS.md` patching, structured JSON output, and idempotence tests. Plain `meshlet init` behavior remains unchanged. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, and `rtk cargo test --locked`. Test result: 96 passed.
+- 2026-07-06: `meshlet.toml` project config support was added as an inactive library module with default TOML generation, config loading, and missing-file fallback. Existing CLI command behavior is unchanged. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, and `rtk cargo test --locked`. Test result: 91 passed.
 - 2026-07-06: Public OKF export now applies public-safe event filtering before `LIMIT`, covering the newer-private/older-public `limit=1` regression. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo test --locked`, `rtk cargo clippy --all-targets --all-features -- -D warnings`, and `rtk run graphify update .`. Test result: 89 passed.
 - 2026-07-06: v0.4.1 release smoke automation was added as `scripts/release_smoke.sh`. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, `rtk cargo test --locked`, `rtk cargo clippy --all-targets --all-features -- -D warnings`, `rtk run scripts/release_smoke.sh`, and `rtk run graphify update .`. Smoke status: exit 0, temporary `/tmp/meshlet-v04-smoke` cleanup verified.
 - 2026-07-05: v0.4.1 adoption-hardening docs were added for install workflow, event schema, and the public-safe contract. Runtime/API/schema behavior is unchanged; Cargo package version remains `0.4.0` until an explicit release/tag decision. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked`. Test result: 88 passed.
@@ -101,8 +106,8 @@ v0.4.1 - Adoption Hardening.
 
 ## Next 3 Tasks
 
-1. Use `rtk run scripts/release_smoke.sh` as the local v0.4/v0.4.1 RC smoke while GitHub Actions is blocked.
-2. After Actions can run real steps, rerun workflow dispatch and compare CI with local locked gates plus release smoke.
+1. Pick the next v0.4.1 adoption-hardening tranche after `init --adopt`.
+2. Use `rtk run scripts/release_smoke.sh` as the local v0.4/v0.4.1 RC smoke while GitHub Actions is blocked.
 3. Defer binary release workflow and any public `v0.4.0`/`v0.4.1` tag or GitHub Release until Actions can execute real `Format`, `Check`, `Build`, and `Test` steps.
 
 ## Maintenance Rules
