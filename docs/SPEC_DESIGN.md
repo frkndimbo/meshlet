@@ -1,25 +1,24 @@
-# Spec Design: Public OKF Limit Fix
+# Spec Design: v0.4.1 Release Smoke Automation
 
 ## Objective
 
-Fix the public-safe OKF export limit path so visibility filtering happens before `LIMIT`.
+Make the existing v0.4 release smoke checklist runnable as one local maintainer command.
 
 ## Changes
 
-- Use the existing scoped event reader in OKF export instead of filtering after a local-trusted event limit.
-- Keep the fix narrow: no schema, MCP, CLI, dependency, or export-format changes.
-- Add a regression test for a newer private event hiding an older public event at `limit=1`.
-- Apply minimal clippy cleanup only where it keeps the code simpler.
+- Add a small Bash smoke script that builds the debug binary, creates a fresh `/tmp/meshlet-v04-smoke` workspace, runs the public-safe release smoke flow, and removes the workspace on exit.
+- Keep the script as maintainer automation only; no Meshlet CLI subcommand, schema change, MCP change, Cargo version bump, or release tag.
+- Update the release checklist to point maintainers at the script while preserving the manual steps.
 
 ## Boundaries
 
-- Do not broaden v0.4 scope.
-- Do not change Cargo metadata, SQLite schema, MCP wire shape, CLI args, or OKF document format.
-- Do not refactor inline tests, batch timelines, or introduce request structs unless required by verification.
+- Do not broaden v0.4.1 beyond adoption hardening.
+- Do not change runtime behavior, public export shape, OKF format, MCP JSON-RPC shape, or SQLite schema.
+- Do not add dependencies or CI release workflow.
 - Preserve unrelated pre-existing working-tree edits.
 
 ## Success Criteria
 
-- OKF public export returns the older public event even when a newer private event exists and `limit=1`.
-- Public-safe output remains compact and public-only.
-- `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo test --locked`, and `rtk cargo clippy --all-targets --all-features -- -D warnings` pass.
+- `rtk run scripts/release_smoke.sh` exercises init, event append, verify, public doctor, JSON export, OKF export/doctor, public-safe MCP digest, public-safe MCP mutation rejection, and private-marker absence checks.
+- Temporary smoke state is removed on success or failure.
+- Local locked gates and clippy pass.

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-v0.4 - Agent Mailbox.
+v0.4.1 - Adoption Hardening.
 
 ## Current State
 
@@ -47,10 +47,12 @@ v0.4 - Agent Mailbox.
 - Property tests cover randomized hash-chain appends, single-field event tampering, and adjacent event reordering.
 - Agent docs and policy docs exist: AGENTS.md, README.md, docs/SCOPE.md, docs/MCP_POLICY.md, docs/SKILL_POLICY.md, docs/SECURITY_POLICY.md, docs/GRAPH_POLICY.md.
 - Contributor docs and a GitHub bug-report template exist: CONTRIBUTING.md and `.github/ISSUE_TEMPLATE/bug_report.yml`.
+- v0.4.1 adoption docs exist: docs/INSTALL.md, docs/EVENT_SCHEMA.md, and docs/PUBLIC_SAFE_CONTRACT.md.
 - OKF policy docs exist in docs/OKF_POLICY.md.
-- v0.4 release smoke checklist exists in docs/RELEASE_CHECKLIST.md.
+- v0.4 release smoke checklist exists in docs/RELEASE_CHECKLIST.md, with `scripts/release_smoke.sh` as the preferred local maintainer smoke.
 - GitHub publication metadata and repository hygiene notes exist in docs/GITHUB_PUBLICATION.md.
 - Repository is private; public `v0.4.0` release tagging is intentionally skipped while GitHub Actions remains blocked by an account-level billing-lock state.
+- README now describes the current private v0.4.1 adoption-hardening target while keeping the crate package version at `0.4.0`.
 - Repository no longer tracks local Codex config or generated Graphify output.
 - Minimum supported Rust version is `1.85`.
 - Ponytail is installed and enabled in the local Codex plugin registry as a simplicity/over-engineering guard. Project rules keep it subordinate to Meshlet safety, scope, architecture, and verification gates.
@@ -59,6 +61,8 @@ v0.4 - Agent Mailbox.
 ## Last Verified
 
 - 2026-07-06: Public OKF export now applies public-safe event filtering before `LIMIT`, covering the newer-private/older-public `limit=1` regression. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo test --locked`, `rtk cargo clippy --all-targets --all-features -- -D warnings`, and `rtk run graphify update .`. Test result: 89 passed.
+- 2026-07-06: v0.4.1 release smoke automation was added as `scripts/release_smoke.sh`. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, `rtk cargo test --locked`, `rtk cargo clippy --all-targets --all-features -- -D warnings`, `rtk run scripts/release_smoke.sh`, and `rtk run graphify update .`. Smoke status: exit 0, temporary `/tmp/meshlet-v04-smoke` cleanup verified.
+- 2026-07-05: v0.4.1 adoption-hardening docs were added for install workflow, event schema, and the public-safe contract. Runtime/API/schema behavior is unchanged; Cargo package version remains `0.4.0` until an explicit release/tag decision. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked`. Test result: 88 passed.
 - 2026-07-05: Repository visibility is private and PR #5 was merged into `PUSAT` as merge commit `1bcde791a77ed32a093ca082bcb04a528250a8df`. Local `PUSAT` was fast-forwarded to `origin/PUSAT`. With GitHub Actions still blocked before runner startup, local private-trunk verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked`. Test result: 88 passed.
 - 2026-07-05: Public `v0.4.0` release is intentionally skipped before tagging/publishing. PR #5 remains open with the reversible workflow dispatch/docs change, but GitHub Actions still fails before runner startup with `steps: []` and the annotation "The job was not started because your account is locked due to a billing issue." The next operating posture is private-repo use until the account-level Actions blocker is cleared.
 - 2026-07-05: CI recovery diagnosis found latest `PUSAT` run `28735853418` failed before any steps ran: job `quality` had `steps: []`, `runner_id: 0`, and a public GitHub annotation stating "The job was not started because your account is locked due to a billing issue." Added `workflow_dispatch` to the Rust workflow for manual reruns after the account-level billing blocker is cleared. Local verification passed: `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo build --locked`, and `rtk cargo test --locked`. Test result: 88 passed. Release tag `v0.4.0` is still blocked until `PUSAT` CI is genuinely green.
@@ -97,9 +101,9 @@ v0.4 - Agent Mailbox.
 
 ## Next 3 Tasks
 
-1. Use local private-trunk gates (`fmt`, `check --locked`, `build --locked`, `test --locked`) as the required verification path while GitHub Actions is blocked.
-2. Start private v0.4.1 adoption hardening: branding cleanup, install docs, event schema docs, and public-safe contract docs.
-3. Defer binary release workflow and any public `v0.4.0` tag/GitHub Release until Actions can execute real `Format`, `Check`, `Build`, and `Test` steps.
+1. Use `rtk run scripts/release_smoke.sh` as the local v0.4/v0.4.1 RC smoke while GitHub Actions is blocked.
+2. After Actions can run real steps, rerun workflow dispatch and compare CI with local locked gates plus release smoke.
+3. Defer binary release workflow and any public `v0.4.0`/`v0.4.1` tag or GitHub Release until Actions can execute real `Format`, `Check`, `Build`, and `Test` steps.
 
 ## Maintenance Rules
 

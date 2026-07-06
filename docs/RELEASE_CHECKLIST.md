@@ -2,6 +2,14 @@
 
 Use this checklist before tagging or merging a v0.4 release branch. Run commands from the repository root unless a step says otherwise.
 
+Preferred local maintainer smoke:
+
+```bash
+rtk run scripts/release_smoke.sh
+```
+
+The script runs the fresh local smoke, public export smoke, MCP public-safe smoke, and cleanup steps below.
+
 ## Automated Gates
 
 - [ ] `rtk cargo fmt --check`

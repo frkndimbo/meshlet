@@ -1,14 +1,17 @@
-# Eval Design: Public OKF Limit Fix
+# Eval Design: v0.4.1 Release Smoke Automation
 
 ## Verification
 
-- Add a regression where a private event is newer than a public event and OKF export runs with `limit=1`.
-- Confirm `public_export_okf` uses public-safe event filtering before applying the limit.
-- Run `rtk cargo fmt --check`, `rtk cargo check --locked`, `rtk cargo test --locked`, and `rtk cargo clippy --all-targets --all-features -- -D warnings`.
-- Inspect `rtk git diff --stat` and targeted diffs for source, tests, and docs.
+- Run `rtk cargo fmt --check`.
+- Run `rtk cargo check --locked`.
+- Run `rtk cargo build --locked`.
+- Run `rtk cargo test --locked`.
+- Run `rtk cargo clippy --all-targets --all-features -- -D warnings`.
+- Run `rtk run scripts/release_smoke.sh`.
+- Inspect `rtk git diff --stat` and targeted diffs for docs and script changes.
 
 ## Risk Focus
 
-- Avoid leaking private/local events into OKF output.
-- Avoid changing public export schema or OKF markdown format.
-- Avoid broad refactors that hide the behavior fix.
+- Avoid leaving `/tmp/meshlet-v04-smoke` behind after failures.
+- Avoid leaking private/local markers, local evidence paths, or rejected mutation payloads into public outputs.
+- Avoid changing public runtime behavior while adding maintainer automation.

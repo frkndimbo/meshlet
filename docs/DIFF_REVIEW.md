@@ -1,20 +1,22 @@
-# Diff Review: Public OKF Limit Fix
+# Diff Review: v0.4.1 Release Smoke Automation
 
 ## Reviewed
 
-- `public_export_okf` reads public-safe events before limiting.
-- Regression coverage protects the `limit=1` private-newer/public-older case.
-- Clippy cleanup stays minimal and does not alter public behavior.
-- Spec/eval docs describe this coding tranche.
+- `scripts/release_smoke.sh` mirrors the existing manual release checklist without changing Meshlet runtime behavior.
+- Smoke workspace cleanup is fixed to `/tmp/meshlet-v04-smoke` and verified after execution.
+- Spec/eval/progress/checklist docs describe the automation tranche and preserve release-blocker scope.
 
 ## Verification
 
+- `rtk run bash -n scripts/release_smoke.sh`
 - `rtk cargo fmt --check`
 - `rtk cargo check --locked`
+- `rtk cargo build --locked`
 - `rtk cargo test --locked` - 89 passed
 - `rtk cargo clippy --all-targets --all-features -- -D warnings`
+- `rtk run scripts/release_smoke.sh` - exit 0
 - `rtk run graphify update .`
 
 ## Result
 
-OKF public export now applies public-safe event filtering before the export limit. Strict local verification passed.
+v0.4.1 now has a single local maintainer smoke command for the release checklist. Public release/tag work remains blocked until GitHub Actions can run real steps.
