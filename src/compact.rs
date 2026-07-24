@@ -6,14 +6,33 @@ use super::public_safe::{
 };
 use super::{Event, EventVisibility, SafetyProfile, nonempty_string};
 
-pub(crate) fn compact_timeline_event(seq: i64, event: &Event) -> Value {
+pub(crate) fn compact_timeline_event(seq: i64, event: &Event, profile: SafetyProfile) -> Value {
     let mut payload = serde_json::Map::new();
     for key in [
         "task_id", "title", "status", "assignee", "note", "from", "to", "summary", "reply_to",
-        "path", "ref",
     ] {
         if let Some(value) = event.payload.get(key) {
             payload.insert(key.to_string(), value.clone());
+        }
+    }
+    if profile == SafetyProfile::PublicSafe {
+        if event.payload.get("path").is_some() {
+            payload.insert("has_path".to_string(), json!(true));
+        }
+        if event.payload.get("ref").is_some() {
+            payload.insert("has_ref".to_string(), json!(true));
+        }
+        if let Some(sha256) = event.payload.get("sha256").and_then(Value::as_str)
+            && sha256.len() == 64
+            && sha256.chars().all(|ch| ch.is_ascii_hexdigit())
+        {
+            payload.insert("sha256".to_string(), json!(sha256.to_ascii_lowercase()));
+        }
+    } else {
+        for key in ["path", "ref"] {
+            if let Some(value) = event.payload.get(key) {
+                payload.insert(key.to_string(), value.clone());
+            }
         }
     }
     json!({

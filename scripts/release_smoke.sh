@@ -32,15 +32,29 @@ require_cmd() {
 assert_contains() {
     local needle="$1"
     shift
-    grep -R -- "$needle" "$@" >/dev/null || die "missing expected text: $needle"
+    grep -RF -- "$needle" "$@" >/dev/null || die "missing expected text: $needle"
 }
 
 assert_absent() {
     local needle="$1"
     shift
-    if grep -R -- "$needle" "$@" >/dev/null; then
+    if grep -RF -- "$needle" "$@" >/dev/null; then
         die "unexpected text found: $needle"
     fi
+}
+
+assert_file() {
+    local path="$1"
+    [[ -f "$path" ]] || die "missing expected file: $path"
+}
+
+assert_count() {
+    local needle="$1"
+    local expected="$2"
+    local path="$3"
+    local actual
+    actual="$(grep -Fxc -- "$needle" "$path" || true)"
+    [[ "$actual" == "$expected" ]] || die "expected $expected occurrences of $needle in $path, found $actual"
 }
 
 mcp_call() {
@@ -63,8 +77,27 @@ mkdir -p "$SMOKE_DIR"
 cp "$BIN_SRC" "$BIN"
 cd "$SMOKE_DIR"
 
-log "init + events"
-"$BIN" init
+log "adopt"
+"$BIN" init --adopt > "$SMOKE_DIR/adopt.json"
+assert_file "$SMOKE_DIR/.meshlet/meshlet.db"
+assert_file "$SMOKE_DIR/meshlet.toml"
+assert_file "$SMOKE_DIR/.meshlet-okf/index.md"
+assert_file "$SMOKE_DIR/.meshlet-okf/log.md"
+assert_file "$SMOKE_DIR/.gitignore"
+assert_count ".meshlet/" 1 "$SMOKE_DIR/.gitignore"
+assert_count "graphify-out/" 1 "$SMOKE_DIR/.gitignore"
+
+log "codex setup"
+"$BIN" agent show codex > "$SMOKE_DIR/codex-show.json"
+assert_contains '"meshlet_db_present": true' "$SMOKE_DIR/codex-show.json"
+assert_contains '"meshlet_toml_present": true' "$SMOKE_DIR/codex-show.json"
+assert_contains '[mcp_servers.meshlet]' "$SMOKE_DIR/codex-show.json"
+
+log "refresh okf"
+"$BIN" refresh --okf > "$SMOKE_DIR/refresh-okf.json"
+"$BIN" okf doctor "$SMOKE_DIR/.meshlet-okf"
+
+log "events"
 "$BIN" event append --type context.added --json '{"label":"private-needle-v04"}'
 "$BIN" event append --type context.added --visibility public --profile public-safe --json '{"label":"public-needle-v04"}'
 "$BIN" verify

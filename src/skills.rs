@@ -201,3 +201,109 @@ impl Meshlet {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn skill_payload(name: &str) -> Value {
+        json!({
+            "name": name,
+            "version": "0.1.0",
+            "kind": "skill",
+            "manifest_path": format!("{name}.toml"),
+            "entry": "./SKILL.md",
+            "permissions": ["read_repo"],
+            "description": format!("{name} skill"),
+        })
+    }
+
+    #[test]
+    fn skills_visibility_column_materializes_from_event_visibility() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "skill.added",
+            "agent:test",
+            skill_payload("public-skill"),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let skill = meshlet.show_skill("public-skill")?;
+
+        assert_eq!(skill["visibility"], "public");
+        assert_eq!(skill["source_event_id"].as_str().expect("source").len(), 36);
+        Ok(())
+    }
+
+    #[test]
+    fn skill_manifest_roundtrip_materializes_skill_and_graph() -> Result<()> {
+        let dir = tempdir()?;
+        let manifest_path = dir.path().join("skill.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+name = "rust-review"
+version = "0.1.0"
+kind = "skill"
+entry = "./SKILL.md"
+permissions = ["read_repo", "run_check"]
+description = "Review Rust code."
+"#,
+        )?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.add_skill_manifest(&manifest_path)?;
+        let skill = meshlet.show_skill("rust-review")?;
+        assert_eq!(skill["name"], "rust-review");
+        let skill_nodes = meshlet.graph_nodes(Some("skill"))?;
+        assert_eq!(skill_nodes.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn skill_manifest_rejects_unknown_permission_and_unsafe_entry() -> Result<()> {
+        let dir = tempdir()?;
+        let bad_permission = dir.path().join("bad-permission.toml");
+        fs::write(
+            &bad_permission,
+            r#"
+name = "bad-permission"
+version = "0.1.0"
+kind = "skill"
+entry = "./SKILL.md"
+permissions = ["network"]
+"#,
+        )?;
+        let absolute_entry = dir.path().join("absolute-entry.toml");
+        fs::write(
+            &absolute_entry,
+            r#"
+name = "absolute-entry"
+version = "0.1.0"
+kind = "skill"
+entry = "/tmp/SKILL.md"
+permissions = ["read_repo"]
+"#,
+        )?;
+        let parent_entry = dir.path().join("parent-entry.toml");
+        fs::write(
+            &parent_entry,
+            r#"
+name = "parent-entry"
+version = "0.1.0"
+kind = "skill"
+entry = "../SKILL.md"
+permissions = ["read_repo"]
+"#,
+        )?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        assert!(meshlet.add_skill_manifest(&bad_permission).is_err());
+        assert!(meshlet.add_skill_manifest(&absolute_entry).is_err());
+        assert!(meshlet.add_skill_manifest(&parent_entry).is_err());
+        assert_eq!(meshlet.event_count()?, 1);
+        Ok(())
+    }
+}

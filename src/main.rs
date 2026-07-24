@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use meshlet::{
-    DEFAULT_LIMIT, Meshlet, OutputMode,
-    config::{AdoptOptions, adopt_project},
+    DB_DIR, DB_FILE, DEFAULT_LIMIT, Meshlet, OutputMode, RefreshOptions,
+    config::{
+        AdoptOptions, CONFIG_FILE, CodexAgentInstallOptions, adopt_project, install_codex_agent,
+        show_codex_agent, uninstall_codex_agent,
+    },
     find_project_root, parse_json_arg, parse_output_mode_arg, parse_safety_profile_arg,
     parse_visibility_arg, run_mcp_stdio_with_profile,
 };
@@ -36,6 +39,18 @@ enum Command {
     },
     Status,
     Verify,
+    Refresh {
+        #[arg(long)]
+        graphify: bool,
+        #[arg(long)]
+        okf: bool,
+        #[arg(long)]
+        task_id: Option<String>,
+    },
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
     Query {
         q: String,
         #[arg(long, default_value = "all")]
@@ -94,6 +109,23 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum AgentCommand {
+    Install {
+        agent: String,
+        #[arg(long)]
+        mcp: bool,
+        #[arg(long)]
+        patch: bool,
+    },
+    Show {
+        agent: String,
+    },
+    Uninstall {
+        agent: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum EventCommand {
     Append {
         #[arg(long = "type")]
@@ -137,7 +169,15 @@ enum ExportCommand {
 
 #[derive(Debug, Subcommand)]
 enum OkfCommand {
-    Doctor { bundle_dir: PathBuf },
+    Doctor {
+        bundle_dir: PathBuf,
+    },
+    Sync {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -162,6 +202,8 @@ enum GraphCommand {
         source: String,
         #[arg(long)]
         namespace: String,
+        #[arg(long, default_value = "private")]
+        visibility: String,
     },
 }
 
@@ -272,6 +314,9 @@ enum EvidenceCommand {
     Verify {
         id: String,
     },
+    Retrieve {
+        sha256: String,
+    },
     List {
         #[arg(long, default_value_t = DEFAULT_LIMIT)]
         limit: u32,
@@ -342,6 +387,42 @@ fn main() -> Result<()> {
             let root = find_project_root()?;
             let meshlet = Meshlet::open(&root)?;
             print_json(&meshlet.verify_event_chain()?)?;
+        }
+        Command::Refresh {
+            graphify,
+            okf,
+            task_id,
+        } => {
+            let root = find_project_root()?;
+            let meshlet = Meshlet::open(&root)?;
+            print_json(&meshlet.refresh(RefreshOptions {
+                graphify,
+                okf,
+                task_id,
+            })?)?;
+        }
+        Command::Agent { command } => {
+            let root = find_agent_project_root()?;
+            match command {
+                AgentCommand::Install { agent, mcp, patch } => {
+                    ensure_codex_agent(&agent)?;
+                    print_json(&install_codex_agent(
+                        &root,
+                        &CodexAgentInstallOptions {
+                            patch_project_config: patch,
+                            mcp,
+                        },
+                    )?)?;
+                }
+                AgentCommand::Show { agent } => {
+                    ensure_codex_agent(&agent)?;
+                    print_json(&show_codex_agent(&root)?)?;
+                }
+                AgentCommand::Uninstall { agent } => {
+                    ensure_codex_agent(&agent)?;
+                    print_json(&uninstall_codex_agent(&root)?)?;
+                }
+            }
         }
         Command::Query {
             q,
@@ -422,7 +503,13 @@ fn main() -> Result<()> {
                     graph_path,
                     source,
                     namespace,
-                } => print_json(&meshlet.import_graph_file(graph_path, &source, &namespace)?)?,
+                    visibility,
+                } => print_json(&meshlet.import_graph_file_with_visibility(
+                    graph_path,
+                    &source,
+                    &namespace,
+                    parse_visibility_arg(&visibility)?,
+                )?)?,
             }
         }
         Command::Skill { command } => {
@@ -543,6 +630,9 @@ fn main() -> Result<()> {
                     sha256.as_deref(),
                 )?)?,
                 EvidenceCommand::Verify { id } => print_json(&meshlet.verify_evidence(&id)?)?,
+                EvidenceCommand::Retrieve { sha256 } => {
+                    print_json(&meshlet.retrieve_evidence_by_hash(&sha256)?)?
+                }
                 EvidenceCommand::List { limit, profile } => print_json(
                     &meshlet.list_evidence_scoped(limit, parse_safety_profile_arg(&profile)?)?,
                 )?,
@@ -590,6 +680,11 @@ fn main() -> Result<()> {
         }
         Command::Okf { command } => match command {
             OkfCommand::Doctor { bundle_dir } => print_json(&Meshlet::okf_doctor(bundle_dir)?)?,
+            OkfCommand::Sync { out, profile } => {
+                let root = find_project_root()?;
+                let meshlet = Meshlet::open(&root)?;
+                print_json(&meshlet.okf_sync(&out, parse_safety_profile_arg(&profile)?)?)?;
+            }
         },
         Command::Serve { mcp, profile } => {
             if mcp.as_deref() != Some("stdio") {
@@ -606,4 +701,25 @@ fn main() -> Result<()> {
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn ensure_codex_agent(agent: &str) -> Result<()> {
+    if agent == "codex" {
+        Ok(())
+    } else {
+        bail!("only `codex` agent is supported")
+    }
+}
+
+fn find_agent_project_root() -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    for dir in cwd.ancestors() {
+        if dir.join(DB_DIR).join(DB_FILE).exists()
+            || dir.join(CONFIG_FILE).exists()
+            || dir.join(".git").exists()
+        {
+            return Ok(dir.to_path_buf());
+        }
+    }
+    Ok(cwd)
 }

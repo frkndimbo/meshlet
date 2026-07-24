@@ -462,3 +462,160 @@ mod property_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn init_creates_repo_event() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        assert_eq!(meshlet.event_count()?, 1);
+        assert!(dir.path().join(DB_DIR).join(DB_FILE).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn append_event_chains_hashes() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let first = meshlet.append_event("context.added", "agent:test", json!({"label": "a"}))?;
+        let second = meshlet.append_event("context.added", "agent:test", json!({"label": "b"}))?;
+        assert_eq!(second.prev_hash.as_deref(), Some(first.hash.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn append_event_rejects_secret_key_names() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        let direct = meshlet.append_event(
+            "context.added",
+            "agent:test",
+            json!({"label": "bad", "api_key": "value"}),
+        );
+        let nested = meshlet.append_event(
+            "context.added",
+            "agent:test",
+            json!({"label": "bad", "nested": {"access-token": "value"}}),
+        );
+
+        assert!(direct.is_err());
+        assert!(nested.is_err());
+        assert_eq!(meshlet.event_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn append_event_accepts_safe_payload_keys() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        meshlet.append_event(
+            "context.added",
+            "agent:test",
+            json!({"label": "safe", "note": "public context"}),
+        )?;
+
+        assert_eq!(meshlet.event_count()?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_append_rejects_secret_looking_values() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        let result = meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "bad", "note": "Bearer abc123"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(meshlet.event_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_event_chain_accepts_clean_events() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event("context.added", "agent:test", json!({"label": "clean"}))?;
+
+        let report = meshlet.verify_event_chain()?;
+
+        assert!(report.ok);
+        assert_eq!(report.events, 2);
+        assert_eq!(report.first_invalid_seq, None);
+        assert_eq!(report.reason, None);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_event_chain_detects_tampered_payload() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let event =
+            meshlet.append_event("context.added", "agent:test", json!({"label": "safe"}))?;
+        meshlet.conn.execute(
+            "UPDATE events SET payload_json = ?1 WHERE id = ?2",
+            params![r#"{"label":"tampered"}"#, event.id],
+        )?;
+
+        let report = meshlet.verify_event_chain()?;
+
+        assert!(!report.ok);
+        assert_eq!(report.first_invalid_seq, Some(2));
+        assert_eq!(report.reason.as_deref(), Some("hash_mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_event_chain_detects_tampered_prev_hash() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let event =
+            meshlet.append_event("context.added", "agent:test", json!({"label": "safe"}))?;
+        meshlet.conn.execute(
+            "UPDATE events SET prev_hash = ?1 WHERE id = ?2",
+            params!["wrong", event.id],
+        )?;
+
+        let report = meshlet.verify_event_chain()?;
+
+        assert!(!report.ok);
+        assert_eq!(report.first_invalid_seq, Some(2));
+        assert_eq!(report.reason.as_deref(), Some("prev_hash_mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_event_chain_detects_tampered_visibility() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let event = meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "private"}),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.conn.execute(
+            "UPDATE events SET visibility = ?1 WHERE id = ?2",
+            params!["public", event.id],
+        )?;
+
+        let report = meshlet.verify_event_chain()?;
+
+        assert!(!report.ok);
+        assert_eq!(report.first_invalid_seq, Some(2));
+        assert_eq!(report.reason.as_deref(), Some("hash_mismatch"));
+        Ok(())
+    }
+}

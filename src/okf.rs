@@ -128,13 +128,6 @@ fn relative_link(from_file: &str, to_file: &str) -> String {
     link
 }
 
-pub(crate) fn metadata_line(label: &str, value: Option<&str>) -> String {
-    value
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| format!("- {label}: `{value}`\n"))
-        .unwrap_or_default()
-}
-
 pub(crate) fn string_value<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }

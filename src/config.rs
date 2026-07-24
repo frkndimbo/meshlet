@@ -7,9 +7,16 @@ use serde::{Deserialize, Serialize};
 
 pub const CONFIG_FILE: &str = "meshlet.toml";
 const AGENTS_FILE: &str = "AGENTS.md";
+const CODEX_DIR: &str = ".codex";
+const CODEX_CONFIG_FILE: &str = "config.toml";
+const CODEX_CONFIG_BACKUP_FILE: &str = "config.toml.meshlet.bak";
 const GITIGNORE_FILE: &str = ".gitignore";
 const OKF_INDEX: &str = "# Meshlet OKF\n\n";
 const OKF_LOG: &str = "# Meshlet OKF Log\n\n";
+const AGENTS_BLOCK_START: &str = "<!-- meshlet:codex:start -->";
+const AGENTS_BLOCK_END: &str = "<!-- meshlet:codex:end -->";
+const CODEX_MCP_BLOCK_START: &str = "# BEGIN Meshlet Codex MCP";
+const CODEX_MCP_BLOCK_END: &str = "# END Meshlet Codex MCP";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -78,6 +85,60 @@ pub struct AdoptReport {
     pub next: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexAgentInstallOptions {
+    pub patch_project_config: bool,
+    pub mcp: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentFileReport {
+    pub path: String,
+    pub section_present: bool,
+    pub patched: bool,
+    pub removed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodexProjectConfigReport {
+    pub path: String,
+    pub known_safe: bool,
+    pub patched: bool,
+    pub backup: Option<String>,
+    pub skipped_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodexAgentInstallReport {
+    pub agent: String,
+    pub root: String,
+    pub explicit_mcp: bool,
+    pub agents_md: AgentFileReport,
+    pub codex_project_config: CodexProjectConfigReport,
+    pub mcp_command_snippet: String,
+    pub recommended_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodexAgentShowReport {
+    pub agent: String,
+    pub root: String,
+    pub agents_md_section_present: bool,
+    pub meshlet_toml_present: bool,
+    pub meshlet_db_present: bool,
+    pub okf_out_dir: String,
+    pub okf_out_dir_present: bool,
+    pub mcp_command_snippet: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodexAgentUninstallReport {
+    pub agent: String,
+    pub root: String,
+    pub agents_md: AgentFileReport,
+    pub manual_cleanup: Vec<String>,
+}
+
 impl MeshletConfig {
     pub fn load_from(root: impl AsRef<Path>) -> Result<Self> {
         let path = root.as_ref().join(CONFIG_FILE);
@@ -121,6 +182,15 @@ impl Default for AdoptOptions {
     }
 }
 
+impl Default for CodexAgentInstallOptions {
+    fn default() -> Self {
+        Self {
+            patch_project_config: false,
+            mcp: false,
+        }
+    }
+}
+
 pub fn adopt_project(root: impl AsRef<Path>, options: &AdoptOptions) -> Result<AdoptReport> {
     let root = root.as_ref();
     let mut report = AdoptReport::new(options);
@@ -133,6 +203,61 @@ pub fn adopt_project(root: impl AsRef<Path>, options: &AdoptOptions) -> Result<A
     }
 
     Ok(report)
+}
+
+pub fn install_codex_agent(
+    root: impl AsRef<Path>,
+    options: &CodexAgentInstallOptions,
+) -> Result<CodexAgentInstallReport> {
+    let root = root.as_ref();
+    let agents_md = patch_codex_agents(root)?;
+    let codex_project_config = if options.patch_project_config {
+        patch_codex_project_config(root)?
+    } else {
+        codex_project_config_status(root, Some("run with --patch to update project config"))
+    };
+
+    Ok(CodexAgentInstallReport {
+        agent: "codex".to_string(),
+        root: path_string(root),
+        explicit_mcp: options.mcp,
+        agents_md,
+        codex_project_config,
+        mcp_command_snippet: codex_mcp_config_snippet(),
+        recommended_commands: codex_recommended_commands(),
+    })
+}
+
+pub fn show_codex_agent(root: impl AsRef<Path>) -> Result<CodexAgentShowReport> {
+    let root = root.as_ref();
+    let config = MeshletConfig::load_from(root)?;
+    let okf_dir = config.okf.out_dir;
+
+    Ok(CodexAgentShowReport {
+        agent: "codex".to_string(),
+        root: path_string(root),
+        agents_md_section_present: codex_agents_present(&root.join(AGENTS_FILE))?,
+        meshlet_toml_present: root.join(CONFIG_FILE).exists(),
+        meshlet_db_present: root.join(".meshlet").join("meshlet.db").exists(),
+        okf_out_dir_present: root.join(&okf_dir).exists(),
+        okf_out_dir: okf_dir,
+        mcp_command_snippet: codex_mcp_config_snippet(),
+    })
+}
+
+pub fn uninstall_codex_agent(root: impl AsRef<Path>) -> Result<CodexAgentUninstallReport> {
+    let root = root.as_ref();
+    Ok(CodexAgentUninstallReport {
+        agent: "codex".to_string(),
+        root: path_string(root),
+        agents_md: remove_codex_agents(root)?,
+        manual_cleanup: vec![
+            "Remove `.codex/config.toml` `[mcp_servers.meshlet]` manually if you patched it."
+                .to_string(),
+            "Keep or remove `meshlet.toml`, `.meshlet/`, `.meshlet-okf/`, and `graphify-out/` per project policy."
+                .to_string(),
+        ],
+    })
 }
 
 impl AdoptReport {
@@ -266,6 +391,228 @@ fn append_text(path: &Path, section: &str) -> Result<()> {
     fs::write(path, text).with_context(|| format!("patch {}", path.display()))
 }
 
+fn patch_codex_agents(root: &Path) -> Result<AgentFileReport> {
+    let path = root.join(AGENTS_FILE);
+    let text = read_text_or_empty(&path)?;
+    let section = codex_agents_block();
+
+    let (next, patched) = if has_marked_block(&text, AGENTS_BLOCK_START, AGENTS_BLOCK_END) {
+        let next = replace_marked_block(&text, AGENTS_BLOCK_START, AGENTS_BLOCK_END, &section)?;
+        let patched = next != text;
+        (next, patched)
+    } else {
+        (append_block_text(text, &section), true)
+    };
+
+    if patched {
+        fs::write(&path, next).with_context(|| format!("patch {}", path.display()))?;
+    }
+
+    Ok(AgentFileReport {
+        path: AGENTS_FILE.to_string(),
+        section_present: true,
+        patched,
+        removed: false,
+    })
+}
+
+fn remove_codex_agents(root: &Path) -> Result<AgentFileReport> {
+    let path = root.join(AGENTS_FILE);
+    let text = read_text_or_empty(&path)?;
+    let present = has_marked_block(&text, AGENTS_BLOCK_START, AGENTS_BLOCK_END);
+    if !present {
+        return Ok(AgentFileReport {
+            path: AGENTS_FILE.to_string(),
+            section_present: false,
+            patched: false,
+            removed: false,
+        });
+    }
+
+    let next = remove_marked_block(&text, AGENTS_BLOCK_START, AGENTS_BLOCK_END)?;
+    fs::write(&path, next).with_context(|| format!("patch {}", path.display()))?;
+    Ok(AgentFileReport {
+        path: AGENTS_FILE.to_string(),
+        section_present: false,
+        patched: true,
+        removed: true,
+    })
+}
+
+fn codex_agents_present(path: &Path) -> Result<bool> {
+    let text = read_text_or_empty(path)?;
+    Ok(has_marked_block(
+        &text,
+        AGENTS_BLOCK_START,
+        AGENTS_BLOCK_END,
+    ))
+}
+
+fn patch_codex_project_config(root: &Path) -> Result<CodexProjectConfigReport> {
+    let Some(path) = safe_codex_project_config_path(root)? else {
+        return Ok(codex_project_config_status(
+            root,
+            Some("project `.codex/config.toml` path is not safe"),
+        ));
+    };
+
+    let text = read_text_or_empty(&path)?;
+    if !has_marked_block(&text, CODEX_MCP_BLOCK_START, CODEX_MCP_BLOCK_END)
+        && has_unmanaged_meshlet_mcp_table(&text)
+    {
+        return Ok(CodexProjectConfigReport {
+            path: path_string(Path::new(CODEX_DIR).join(CODEX_CONFIG_FILE).as_path()),
+            known_safe: true,
+            patched: false,
+            backup: None,
+            skipped_reason: Some(
+                "`[mcp_servers.meshlet]` already exists outside the Meshlet-managed block"
+                    .to_string(),
+            ),
+        });
+    }
+
+    let block = codex_mcp_config_block();
+    let next = if has_marked_block(&text, CODEX_MCP_BLOCK_START, CODEX_MCP_BLOCK_END) {
+        replace_marked_block(&text, CODEX_MCP_BLOCK_START, CODEX_MCP_BLOCK_END, &block)?
+    } else {
+        append_block_text(text.clone(), &block)
+    };
+
+    if next == text {
+        return Ok(CodexProjectConfigReport {
+            path: path_string(Path::new(CODEX_DIR).join(CODEX_CONFIG_FILE).as_path()),
+            known_safe: true,
+            patched: false,
+            backup: None,
+            skipped_reason: None,
+        });
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+
+    let backup = if path.exists() {
+        let backup_path = path.with_file_name(CODEX_CONFIG_BACKUP_FILE);
+        fs::copy(&path, &backup_path).with_context(|| format!("backup {}", path.display()))?;
+        Some(path_string(
+            Path::new(CODEX_DIR)
+                .join(CODEX_CONFIG_BACKUP_FILE)
+                .as_path(),
+        ))
+    } else {
+        None
+    };
+
+    fs::write(&path, next).with_context(|| format!("patch {}", path.display()))?;
+    Ok(CodexProjectConfigReport {
+        path: path_string(Path::new(CODEX_DIR).join(CODEX_CONFIG_FILE).as_path()),
+        known_safe: true,
+        patched: true,
+        backup,
+        skipped_reason: None,
+    })
+}
+
+fn codex_project_config_status(
+    root: &Path,
+    skipped_reason: Option<&str>,
+) -> CodexProjectConfigReport {
+    let known_safe = safe_codex_project_config_path(root)
+        .ok()
+        .flatten()
+        .is_some();
+    CodexProjectConfigReport {
+        path: path_string(Path::new(CODEX_DIR).join(CODEX_CONFIG_FILE).as_path()),
+        known_safe,
+        patched: false,
+        backup: None,
+        skipped_reason: skipped_reason.map(str::to_string),
+    }
+}
+
+fn safe_codex_project_config_path(root: &Path) -> Result<Option<PathBuf>> {
+    let codex_dir = root.join(CODEX_DIR);
+    if codex_dir.exists() {
+        let metadata = fs::symlink_metadata(&codex_dir)
+            .with_context(|| format!("inspect {}", codex_dir.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Ok(None);
+        }
+    }
+
+    let config_path = codex_dir.join(CODEX_CONFIG_FILE);
+    if config_path.exists() {
+        let metadata = fs::symlink_metadata(&config_path)
+            .with_context(|| format!("inspect {}", config_path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(config_path))
+}
+
+fn append_block_text(mut text: String, block: &str) -> String {
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(block);
+    text
+}
+
+fn has_marked_block(text: &str, start: &str, end: &str) -> bool {
+    text.contains(start) && text.contains(end)
+}
+
+fn replace_marked_block(text: &str, start: &str, end: &str, replacement: &str) -> Result<String> {
+    let before_start = text
+        .find(start)
+        .with_context(|| format!("missing managed block start marker `{start}`"))?;
+    let after_start = before_start + start.len();
+    let after_end = text[after_start..]
+        .find(end)
+        .map(|index| after_start + index + end.len())
+        .with_context(|| format!("missing managed block end marker `{end}`"))?;
+    let mut next = String::new();
+    next.push_str(text[..before_start].trim_end_matches('\n'));
+    if !next.is_empty() {
+        next.push_str("\n\n");
+    }
+    next.push_str(replacement);
+    next.push_str(text[after_end..].trim_start_matches('\n'));
+    Ok(next)
+}
+
+fn remove_marked_block(text: &str, start: &str, end: &str) -> Result<String> {
+    let before_start = text
+        .find(start)
+        .with_context(|| format!("missing managed block start marker `{start}`"))?;
+    let after_start = before_start + start.len();
+    let after_end = text[after_start..]
+        .find(end)
+        .map(|index| after_start + index + end.len())
+        .with_context(|| format!("missing managed block end marker `{end}`"))?;
+    let mut next = String::new();
+    next.push_str(text[..before_start].trim_end_matches('\n'));
+    next.push_str(text[after_end..].trim_start_matches('\n'));
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    Ok(next)
+}
+
+fn has_unmanaged_meshlet_mcp_table(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        line == "[mcp_servers.meshlet]" || line == "[mcp_servers.\"meshlet\"]"
+    })
+}
+
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -292,6 +639,31 @@ fn agents_section(options: &AdoptOptions) -> String {
         trailing_slash(&path_string(&options.graphify_out_dir)),
         trailing_slash(&path_string(&options.okf_dir)),
     )
+}
+
+fn codex_agents_block() -> String {
+    format!(
+        "{AGENTS_BLOCK_START}\n## Meshlet Workflow\n- Inspect setup with `meshlet agent show codex`.\n- Refresh local context with `meshlet refresh --graphify --okf` after meaningful source or docs changes.\n- Serve local MCP with `meshlet serve --mcp stdio` when Codex needs Meshlet context tools.\n- Keep `meshlet.toml`, `.meshlet/`, `.meshlet-okf/`, and `graphify-out/` local unless project policy says otherwise.\n{AGENTS_BLOCK_END}\n",
+    )
+}
+
+pub fn codex_mcp_config_snippet() -> String {
+    "[mcp_servers.meshlet]\ncommand = \"meshlet\"\nargs = [\"serve\", \"--mcp\", \"stdio\"]\ncwd = \"..\"\nstartup_timeout_sec = 10\ntool_timeout_sec = 60\n".to_string()
+}
+
+fn codex_mcp_config_block() -> String {
+    format!(
+        "{CODEX_MCP_BLOCK_START}\n{}{CODEX_MCP_BLOCK_END}\n",
+        codex_mcp_config_snippet()
+    )
+}
+
+fn codex_recommended_commands() -> Vec<String> {
+    vec![
+        "meshlet init --adopt".to_string(),
+        "meshlet refresh --graphify --okf".to_string(),
+        "meshlet agent show codex".to_string(),
+    ]
 }
 
 impl Default for MeshletConfig {
@@ -585,6 +957,75 @@ refresh_on_task_done = false
 
         assert!(!report.patched.contains(&AGENTS_FILE.to_string()));
         assert!(!text.contains("## Meshlet"));
+        Ok(())
+    }
+
+    #[test]
+    fn codex_agent_install_patches_agents_idempotently() -> Result<()> {
+        let dir = tempdir()?;
+        fs::write(dir.path().join(AGENTS_FILE), "# Agent Instructions\n")?;
+
+        let first = install_codex_agent(dir.path(), &CodexAgentInstallOptions::default())?;
+        let second = install_codex_agent(dir.path(), &CodexAgentInstallOptions::default())?;
+        let text = fs::read_to_string(dir.path().join(AGENTS_FILE))?;
+
+        assert!(first.agents_md.patched);
+        assert!(!second.agents_md.patched);
+        assert_eq!(text.matches(AGENTS_BLOCK_START).count(), 1);
+        assert_eq!(text.matches(AGENTS_BLOCK_END).count(), 1);
+        assert!(text.contains("## Meshlet Workflow"));
+        Ok(())
+    }
+
+    #[test]
+    fn codex_agent_patch_config_is_idempotent_and_backed_up() -> Result<()> {
+        let dir = tempdir()?;
+        let codex_dir = dir.path().join(CODEX_DIR);
+        fs::create_dir_all(&codex_dir)?;
+        fs::write(codex_dir.join(CODEX_CONFIG_FILE), "model = \"gpt-5\"\n")?;
+        let options = CodexAgentInstallOptions {
+            patch_project_config: true,
+            mcp: true,
+        };
+
+        let first = install_codex_agent(dir.path(), &options)?;
+        let second = install_codex_agent(dir.path(), &options)?;
+        let text = fs::read_to_string(codex_dir.join(CODEX_CONFIG_FILE))?;
+        let backup = fs::read_to_string(codex_dir.join(CODEX_CONFIG_BACKUP_FILE))?;
+
+        assert!(first.codex_project_config.patched);
+        assert_eq!(
+            first.codex_project_config.backup.as_deref(),
+            Some(".codex/config.toml.meshlet.bak")
+        );
+        assert!(!second.codex_project_config.patched);
+        assert!(second.codex_project_config.backup.is_none());
+        assert_eq!(backup, "model = \"gpt-5\"\n");
+        let _: toml::Value = toml::from_str(&text)?;
+        assert!(text.contains("model = \"gpt-5\""));
+        assert_eq!(text.matches(CODEX_MCP_BLOCK_START).count(), 1);
+        assert_eq!(text.matches(CODEX_MCP_BLOCK_END).count(), 1);
+        assert_eq!(text.matches("[mcp_servers.meshlet]").count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn codex_agent_uninstall_removes_only_managed_agents_block() -> Result<()> {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join(AGENTS_FILE),
+            "# Agent Instructions\n\n## Meshlet\n- legacy local note\n",
+        )?;
+        install_codex_agent(dir.path(), &CodexAgentInstallOptions::default())?;
+
+        let report = uninstall_codex_agent(dir.path())?;
+        let text = fs::read_to_string(dir.path().join(AGENTS_FILE))?;
+
+        assert!(report.agents_md.removed);
+        assert!(!text.contains(AGENTS_BLOCK_START));
+        assert!(!text.contains(AGENTS_BLOCK_END));
+        assert!(text.contains("## Meshlet\n- legacy local note"));
+        assert!(text.contains("# Agent Instructions"));
         Ok(())
     }
 

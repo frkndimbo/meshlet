@@ -175,7 +175,7 @@ impl Meshlet {
                 continue;
             }
             if event_task_id(&record.event).as_deref() == Some(task_id) {
-                items.push(compact_timeline_event(record.seq, &record.event));
+                items.push(compact_timeline_event(record.seq, &record.event, profile));
             }
         }
         let truncated = items.len() > limit;
@@ -329,6 +329,181 @@ impl Meshlet {
             &event.id,
             event.visibility,
         )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn task_and_evidence_views_track_latest_state_and_graph_edges() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "task.created",
+            "agent:test",
+            json!({"task_id": "task-1", "title": "Ship journal", "status": "open"}),
+        )?;
+        meshlet.append_event(
+            "task.updated",
+            "agent:test",
+            json!({"task_id": "task-1", "status": "in_progress"}),
+        )?;
+        meshlet.append_event(
+            "task.updated",
+            "agent:test",
+            json!({"task_id": "task-1", "status": "done", "note": "verified"}),
+        )?;
+        let evidence = meshlet.append_event(
+            "evidence.attached",
+            "agent:test",
+            json!({"path": "src/lib.rs", "task_id": "task-1", "note": "impl"}),
+        )?;
+
+        let task = meshlet.show_task("task-1")?;
+        assert_eq!(task["status"], "done");
+        assert_eq!(task["note"], "verified");
+        assert_eq!(meshlet.list_tasks(20)?.len(), 1);
+        assert_eq!(meshlet.list_evidence(20)?.len(), 1);
+        assert_eq!(
+            meshlet.show_evidence(&format!("evidence:{}", evidence.id))?["kind"],
+            "evidence"
+        );
+        assert!(
+            meshlet
+                .graph_edges_limited(Some(&format!("evidence:{}", evidence.id)), 20)?
+                .iter()
+                .any(|edge| edge["kind"] == "supports" && edge["to_id"] == "task:task-1")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn task_and_evidence_payloads_require_core_fields() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        assert!(
+            meshlet
+                .append_event("task.created", "agent:test", json!({"status": "open"}))
+                .is_err()
+        );
+        assert!(
+            meshlet
+                .append_event("task.updated", "agent:test", json!({"status": "done"}))
+                .is_err()
+        );
+        assert!(
+            meshlet
+                .append_event(
+                    "evidence.attached",
+                    "agent:test",
+                    json!({"note": "missing"})
+                )
+                .is_err()
+        );
+        assert_eq!(meshlet.event_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_task_reads_replay_public_events_only() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "task.created",
+            "agent:test",
+            json!({"task_id": "public-task", "title": "Public task"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.append_event_with_options(
+            "task.updated",
+            "agent:test",
+            json!({"task_id": "public-task", "status": "blocked", "note": "hidden"}),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.append_event_with_options(
+            "task.created",
+            "agent:test",
+            json!({"task_id": "private-task", "title": "Private task"}),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+
+        let public_tasks = meshlet.list_tasks_scoped(20, SafetyProfile::PublicSafe)?;
+        let public_task = meshlet.show_task_scoped("public-task", SafetyProfile::PublicSafe)?;
+
+        assert_eq!(public_tasks.len(), 1);
+        assert_eq!(public_task["status"], "open");
+        assert!(public_task.get("note").is_none_or(Value::is_null));
+        assert!(
+            meshlet
+                .show_task_scoped("private-task", SafetyProfile::PublicSafe)
+                .is_err()
+        );
+        assert_eq!(meshlet.show_task("public-task")?["status"], "blocked");
+        Ok(())
+    }
+
+    #[test]
+    fn task_state_machine_rejects_invalid_transition() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.create_task(
+            Some("state-task"),
+            "State task",
+            None,
+            None,
+            None,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+
+        assert!(
+            meshlet
+                .update_task(
+                    "state-task",
+                    Some("done"),
+                    None,
+                    None,
+                    EventVisibility::Private,
+                    SafetyProfile::LocalTrusted,
+                )
+                .is_err()
+        );
+        meshlet.update_task(
+            "state-task",
+            Some("in_progress"),
+            None,
+            None,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.update_task(
+            "state-task",
+            Some("done"),
+            None,
+            None,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        assert!(
+            meshlet
+                .update_task(
+                    "state-task",
+                    Some("in_progress"),
+                    None,
+                    None,
+                    EventVisibility::Private,
+                    SafetyProfile::LocalTrusted,
+                )
+                .is_err()
+        );
         Ok(())
     }
 }

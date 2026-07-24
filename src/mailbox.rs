@@ -209,3 +209,83 @@ fn insert_public_mailbox_string(
         out.insert(key.to_string(), json!(value));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn mailbox_views_track_inbox_outbox_and_task_timeline() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.create_task(
+            Some("mail-task"),
+            "Mail task",
+            None,
+            Some("agent:b"),
+            None,
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.send_agent_message(
+            "agent:a",
+            "agent:b",
+            "Please handle this",
+            Some("mail-task"),
+            Some("body"),
+            None,
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let inbox = meshlet.list_mailbox("agent:b", "inbox", 20, SafetyProfile::PublicSafe)?;
+        let outbox = meshlet.list_mailbox("agent:a", "outbox", 20, SafetyProfile::PublicSafe)?;
+        let timeline = meshlet.task_timeline("mail-task", 20, SafetyProfile::PublicSafe)?;
+
+        assert_eq!(inbox["messages"]["items"][0]["from"], "agent:a");
+        assert_eq!(outbox["messages"]["items"][0]["to"], "agent:b");
+        assert_eq!(timeline["items"].as_array().expect("timeline").len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_timeline_excludes_hidden_events() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.create_task(
+            Some("timeline-task"),
+            "Timeline task",
+            None,
+            None,
+            None,
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        meshlet.send_agent_message(
+            "agent:a",
+            "agent:b",
+            "Hidden note",
+            Some("timeline-task"),
+            None,
+            None,
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.append_event_with_options(
+            "evidence.attached",
+            "agent:test",
+            json!({"path": "src/lib.rs", "task_id": "timeline-task"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let timeline = meshlet.task_timeline("timeline-task", 20, SafetyProfile::PublicSafe)?;
+        let items = timeline["items"].as_array().expect("timeline");
+
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item["visibility"] == "public"));
+        assert!(items.iter().all(|item| item["type"] != "agent.message"));
+        Ok(())
+    }
+}

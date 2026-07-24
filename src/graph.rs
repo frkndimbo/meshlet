@@ -111,6 +111,21 @@ impl Meshlet {
         source: &str,
         namespace: &str,
     ) -> Result<Value> {
+        self.import_graph_file_with_visibility(
+            graph_path,
+            source,
+            namespace,
+            EventVisibility::Private,
+        )
+    }
+
+    pub fn import_graph_file_with_visibility(
+        &self,
+        graph_path: impl AsRef<Path>,
+        source: &str,
+        namespace: &str,
+        visibility: EventVisibility,
+    ) -> Result<Value> {
         if source.trim().is_empty() {
             bail!("source must not be empty");
         }
@@ -132,7 +147,12 @@ impl Meshlet {
             .cloned()
             .ok_or_else(|| anyhow!("graph JSON links must be an array"))?;
         let source_sha256 = sha256_hex(&bytes);
-        self.append_event(
+        let profile = if visibility == EventVisibility::Public {
+            SafetyProfile::PublicSafe
+        } else {
+            SafetyProfile::LocalTrusted
+        };
+        self.append_event_with_options(
             "graph.imported",
             "cli",
             json!({
@@ -143,11 +163,14 @@ impl Meshlet {
                 "nodes": nodes,
                 "links": links,
             }),
+            visibility,
+            profile,
         )?;
         Ok(json!({
             "status": "imported",
             "source": source,
             "namespace": namespace,
+            "visibility": visibility.as_str(),
             "source_sha256": source_sha256,
             "nodes": nodes.len(),
             "edges": links.len(),
@@ -544,6 +567,484 @@ impl Meshlet {
              VALUES(?1, ?2, ?3, ?4)",
             params![id, kind, namespace, label],
         )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn skill_payload(name: &str) -> Value {
+        json!({
+            "name": name,
+            "version": "0.1.0",
+            "kind": "skill",
+            "manifest_path": format!("{name}.toml"),
+            "entry": "./SKILL.md",
+            "permissions": ["read_repo"],
+            "description": format!("{name} skill"),
+        })
+    }
+
+    #[test]
+    fn graph_nodes_visibility_column_materializes_from_event_visibility() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "context.added",
+            "agent:test",
+            json!({"label": "public context"}),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let nodes = meshlet.graph_nodes(Some("context"))?;
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0]["visibility"], "public");
+        assert_eq!(nodes[0]["attrs"]["visibility"], "public");
+        Ok(())
+    }
+
+    #[test]
+    fn graph_edges_visibility_column_materializes_from_event_visibility() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "links": [{"source": "a", "target": "b", "relation": "uses"}]
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+
+        let edges = meshlet.graph_edges_limited(Some("graphify:repo:a"), 20)?;
+
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["visibility"], "public");
+        assert_eq!(edges[0]["attrs"]["visibility"], "public");
+        Ok(())
+    }
+
+    #[test]
+    fn rebuild_read_models_preserves_visibility_columns() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event_with_options(
+            "skill.added",
+            "agent:test",
+            skill_payload("local-skill"),
+            EventVisibility::Local,
+            SafetyProfile::LocalTrusted,
+        )?;
+        meshlet.append_event_with_options(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "links": [{"source": "a", "target": "b", "relation": "uses"}]
+            }),
+            EventVisibility::Public,
+            SafetyProfile::PublicSafe,
+        )?;
+        let before_nodes = meshlet.graph_nodes_limited(None, 20)?;
+        let before_edges = meshlet.graph_edges_limited(None, 20)?;
+        let before_skills = meshlet.list_skills()?;
+
+        meshlet.conn.execute("DELETE FROM graph_nodes", [])?;
+        meshlet.conn.execute("DELETE FROM graph_edges", [])?;
+        meshlet.conn.execute("DELETE FROM skills", [])?;
+        meshlet.rebuild_graph()?;
+
+        assert_eq!(before_nodes, meshlet.graph_nodes_limited(None, 20)?);
+        assert_eq!(before_edges, meshlet.graph_edges_limited(None, 20)?);
+        assert_eq!(before_skills, meshlet.list_skills()?);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_rebuild_is_deterministic() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "evidence.attached",
+            "agent:test",
+            json!({"path": "src/main.rs", "note": "entry"}),
+        )?;
+        let before = meshlet.graph_nodes(None)?;
+        meshlet.conn.execute("DELETE FROM graph_nodes", [])?;
+        meshlet.conn.execute("DELETE FROM graph_edges", [])?;
+        meshlet.rebuild_graph()?;
+        assert_eq!(before, meshlet.graph_nodes(None)?);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_import_event_accepts_valid_payload() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "source_path": "graphify-out/graph.json",
+                "source_sha256": "abc123",
+                "nodes": [],
+                "links": []
+            }),
+        )?;
+
+        assert_eq!(meshlet.event_count()?, 2);
+        assert!(meshlet.verify_event_chain()?.ok);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_import_event_rejects_invalid_payload() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        assert!(
+            meshlet
+                .append_event(
+                    "graph.imported",
+                    "agent:test",
+                    json!({"namespace": "graphify:repo", "nodes": [], "links": []})
+                )
+                .is_err()
+        );
+        assert!(
+            meshlet
+                .append_event(
+                    "graph.imported",
+                    "agent:test",
+                    json!({"source": "graphify", "namespace": "", "nodes": [], "links": []})
+                )
+                .is_err()
+        );
+        assert!(
+            meshlet
+                .append_event(
+                    "graph.imported",
+                    "agent:test",
+                    json!({"source": "graphify", "namespace": "graphify:repo", "nodes": {}, "links": []})
+                )
+                .is_err()
+        );
+        assert!(
+            meshlet
+                .append_event(
+                    "graph.imported",
+                    "agent:test",
+                    json!({"source": "graphify", "namespace": "graphify:repo", "nodes": [], "links": {}})
+                )
+                .is_err()
+        );
+        assert_eq!(meshlet.event_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_import_materializes_namespaced_nodes_and_edges() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [
+                    {"id": "a", "label": "A", "source_file": "a.rs", "_origin": "ast"},
+                    {"id": "b", "label": "B", "source_file": "b.rs", "_origin": "ast"}
+                ],
+                "links": [
+                    {"source": "a", "target": "b", "relation": "uses", "confidence": "EXTRACTED"}
+                ]
+            }),
+        )?;
+
+        let nodes = meshlet.graph_nodes_limited(None, 20)?;
+        assert!(
+            nodes.iter().any(|node| node["id"] == "graphify:repo:a"
+                && node["attrs"]["namespace"] == "graphify:repo")
+        );
+        let edges = meshlet.graph_edges_limited(Some("graphify:repo:a"), 20)?;
+        assert!(edges.iter().any(|edge| {
+            edge["to_id"] == "graphify:repo:b"
+                && edge["kind"] == "uses"
+                && edge["attrs"]["relation"] == "uses"
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn graph_rebuild_preserves_imported_graph() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [
+                    {"id": "a", "label": "A"},
+                    {"id": "b", "label": "B"}
+                ],
+                "links": [
+                    {"source": "a", "target": "b", "relation": "unknown_relation"}
+                ]
+            }),
+        )?;
+        let before_nodes = meshlet.graph_nodes_limited(None, 20)?;
+        let before_edges = meshlet.graph_edges_limited(None, 20)?;
+
+        meshlet.conn.execute("DELETE FROM graph_nodes", [])?;
+        meshlet.conn.execute("DELETE FROM graph_edges", [])?;
+        meshlet.rebuild_graph()?;
+
+        assert_eq!(before_nodes, meshlet.graph_nodes_limited(None, 20)?);
+        assert_eq!(before_edges, meshlet.graph_edges_limited(None, 20)?);
+        assert!(
+            meshlet
+                .graph_edges_limited(Some("graphify:repo:a"), 20)?
+                .iter()
+                .any(|edge| edge["kind"] == "references"
+                    && edge["attrs"]["relation"] == "unknown_relation")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn graph_import_file_appends_event_with_digest_and_counts() -> Result<()> {
+        let dir = tempdir()?;
+        let graph_path = dir.path().join("graph.json");
+        fs::write(
+            &graph_path,
+            r#"{
+                "nodes": [
+                    {"id": "a", "label": "A"},
+                    {"id": "b", "label": "B"}
+                ],
+                "links": [
+                    {"source": "a", "target": "b", "relation": "uses"}
+                ]
+            }"#,
+        )?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        let report = meshlet.import_graph_file(&graph_path, "graphify", "graphify:repo")?;
+
+        assert_eq!(report["status"], "imported");
+        assert_eq!(report["source"], "graphify");
+        assert_eq!(report["namespace"], "graphify:repo");
+        assert_eq!(report["visibility"], "private");
+        assert_eq!(report["nodes"], 2);
+        assert_eq!(report["edges"], 1);
+        assert!(report["source_sha256"].as_str().expect("digest").len() == 64);
+        assert_eq!(meshlet.event_count()?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_import_file_default_visibility_is_private() -> Result<()> {
+        let dir = tempdir()?;
+        let graph_path = dir.path().join("graph.json");
+        fs::write(
+            &graph_path,
+            r#"{
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "links": [{"source": "a", "target": "b", "relation": "uses"}]
+            }"#,
+        )?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        meshlet.import_graph_file(&graph_path, "graphify", "graphify:repo")?;
+
+        let event = meshlet
+            .list_events(20)?
+            .into_iter()
+            .find(|event| event.event_type == "graph.imported")
+            .expect("graph import event");
+        let nodes = meshlet.graph_nodes_limited(Some("imported"), 20)?;
+        let edges = meshlet.graph_edges_limited(Some("graphify:repo:a"), 20)?;
+
+        assert_eq!(event.visibility, EventVisibility::Private);
+        assert!(nodes.iter().all(|node| node["visibility"] == "private"));
+        assert!(edges.iter().all(|edge| edge["visibility"] == "private"));
+        Ok(())
+    }
+
+    #[test]
+    fn graph_import_file_local_visibility_materializes_local_graph() -> Result<()> {
+        let dir = tempdir()?;
+        let graph_path = dir.path().join("graph.json");
+        fs::write(
+            &graph_path,
+            r#"{
+                "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "links": [{"source": "a", "target": "b", "relation": "uses"}]
+            }"#,
+        )?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        meshlet.import_graph_file_with_visibility(
+            &graph_path,
+            "graphify",
+            "graphify:repo",
+            EventVisibility::Local,
+        )?;
+
+        let nodes = meshlet.graph_nodes_limited(Some("imported"), 20)?;
+        let edges = meshlet.graph_edges_limited(Some("graphify:repo:a"), 20)?;
+
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(edges.len(), 1);
+        assert!(nodes.iter().all(|node| node["visibility"] == "local"));
+        assert!(edges.iter().all(|edge| edge["visibility"] == "local"));
+        assert!(
+            nodes
+                .iter()
+                .all(|node| node["attrs"]["visibility"] == "local")
+        );
+        assert!(
+            edges
+                .iter()
+                .all(|edge| edge["attrs"]["visibility"] == "local")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_safe_graph_reads_exclude_private_and_local_imports() -> Result<()> {
+        let dir = tempdir()?;
+        let private_path = dir.path().join("private-graph.json");
+        let local_path = dir.path().join("local-graph.json");
+        fs::write(
+            &private_path,
+            r#"{
+                "nodes": [{"id": "private-a", "label": "Hidden private"}],
+                "links": []
+            }"#,
+        )?;
+        fs::write(
+            &local_path,
+            r#"{
+                "nodes": [{"id": "local-a", "label": "Hidden local"}, {"id": "local-b", "label": "Hidden local target"}],
+                "links": [{"source": "local-a", "target": "local-b", "relation": "uses"}]
+            }"#,
+        )?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        meshlet.import_graph_file(&private_path, "graphify", "graphify:repo")?;
+        meshlet.import_graph_file_with_visibility(
+            &local_path,
+            "graphify",
+            "graphify:repo",
+            EventVisibility::Local,
+        )?;
+
+        assert_eq!(
+            meshlet
+                .graph_nodes_bounded(None, 20, SafetyProfile::PublicSafe)?
+                .items
+                .len(),
+            0
+        );
+        assert_eq!(
+            meshlet
+                .graph_edges_bounded(None, 20, SafetyProfile::PublicSafe)?
+                .items
+                .len(),
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_graph_import_is_included_in_public_safe_reads_and_export() -> Result<()> {
+        let dir = tempdir()?;
+        let graph_path = dir.path().join("graph.json");
+        fs::write(
+            &graph_path,
+            r#"{
+                "nodes": [{"id": "public-a", "label": "Public graph"}, {"id": "public-b", "label": "Public target"}],
+                "links": [{"source": "public-a", "target": "public-b", "relation": "uses"}]
+            }"#,
+        )?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        meshlet.import_graph_file_with_visibility(
+            &graph_path,
+            "graphify",
+            "graphify:repo",
+            EventVisibility::Public,
+        )?;
+
+        let nodes = meshlet
+            .graph_nodes_bounded(None, 20, SafetyProfile::PublicSafe)?
+            .items;
+        let edges = meshlet
+            .graph_edges_bounded(None, 20, SafetyProfile::PublicSafe)?
+            .items;
+        let export = meshlet.public_export(20)?;
+
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["id"] == "graphify:repo:public-a")
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge["from_id"] == "graphify:repo:public-a")
+        );
+        assert!(
+            export["graph"]["nodes"]
+                .as_array()
+                .expect("export nodes")
+                .iter()
+                .any(|node| node["id"] == "graphify:repo:public-a")
+        );
+        assert!(
+            export["graph"]["edges"]
+                .as_array()
+                .expect("export edges")
+                .iter()
+                .any(|edge| edge["from_id"] == "graphify:repo:public-a")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn graph_namespaces_lists_imported_namespaces() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        meshlet.append_event(
+            "graph.imported",
+            "agent:test",
+            json!({
+                "source": "graphify",
+                "namespace": "graphify:repo",
+                "nodes": [{"id": "a", "label": "A"}],
+                "links": []
+            }),
+        )?;
+
+        assert_eq!(meshlet.graph_namespaces()?, vec!["graphify:repo"]);
         Ok(())
     }
 }
