@@ -32,8 +32,10 @@ The event log is the source of truth. Graph, task, mailbox, timeline, evidence, 
 - Graphify graph import with namespaces.
 - Skill manifest registration with declared permissions.
 - Evidence SHA-256 attach and verify helpers.
+- Evidence metadata retrieval by SHA-256 without printing file contents.
 - MCP stdio server with typed tools/resources and structured JSON-RPC errors.
 - Public-safe JSON export and OKF markdown export.
+- Adoption commands for project-local Meshlet/Codex setup.
 - `doctor public` checks before sharing public state.
 
 ## Quick Start
@@ -66,8 +68,13 @@ cargo run -- query "repo context" --kind all --limit 20 --mode compact
 | Command | Purpose |
 |---|---|
 | `cargo run -- init` | Create local `.meshlet/` state. |
+| `cargo run -- init --adopt` | Adopt the current repo with config, OKF skeleton, `.gitignore`, and AGENTS guidance. |
 | `cargo run -- status` | Show local runtime status. |
 | `cargo run -- verify` | Verify event hash-chain integrity. |
+| `cargo run -- refresh --graphify --okf` | Refresh configured Graphify import and OKF projection. |
+| `cargo run -- agent install codex` | Patch project `AGENTS.md` and print Codex MCP setup guidance. |
+| `cargo run -- agent install codex --patch` | Patch safe project-local `.codex/config.toml` with Meshlet MCP config. |
+| `cargo run -- agent show codex` | Show detected Meshlet/Codex project setup. |
 | `cargo run -- event list` | List events. |
 | `cargo run -- query "term" --kind all --limit 20 --mode compact` | Search compact local context. |
 | `cargo run -- graph import <graph.json> --source graphify --namespace graphify:repo` | Import a namespaced Graphify graph. |
@@ -75,6 +82,7 @@ cargo run -- query "repo context" --kind all --limit 20 --mode compact
 | `cargo run -- task create --task-id task-1 --title "Ship mailbox"` | Create a typed task event. |
 | `cargo run -- mailbox send --from agent:a --to agent:b --summary "Please handle task-1" --task-id task-1` | Send an agent mailbox message. |
 | `cargo run -- evidence attach --path src/lib.rs --sha256 auto` | Attach evidence with a SHA-256 digest. |
+| `cargo run -- evidence retrieve <sha256>` | Retrieve evidence metadata by SHA-256. |
 | `cargo run -- doctor public` | Check whether public sharing is safe. |
 | `cargo run -- export public --out /tmp/meshlet-public.json` | Write a compact public JSON bundle. |
 | `cargo run -- export public --format okf --out /tmp/meshlet-okf` | Write a public-safe OKF markdown bundle. |

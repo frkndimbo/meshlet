@@ -64,6 +64,17 @@ secrets.*
 
 # Local Codex/agent state
 .codex/
+AGENTS.md
+CLAUDE.md
 
 # Graphify generated output
 graphify-out/
+
+# Docs and test temporary
+docs/
+test/
+
+# GIT Safety and Security
+CONTRIBUTING.md
+
+
