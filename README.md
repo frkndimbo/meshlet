@@ -16,7 +16,7 @@ tamper-evident record of what happened, who did it, and what's safe to expose
 outside the local machine.
 
 There is no vector database and no embedding model here, by design. Every
-event is appended to a hash-chained log, so `meshlet verify` can prove the
+event is appended to a hash-chained log, so `verify` can prove the
 history hasn't been altered — something semantic-recall memory stores aren't
 built to do. Graph, task, mailbox, and timeline views are just materialized
 read models over that log, and can be rebuilt at any time.
@@ -37,6 +37,10 @@ MCP server is probably the right tool. If you want multiple agents
 coordinating through typed tasks and mailbox messages, with an audit trail
 you can verify and a clear boundary between private, local, and public data,
 meshlet is built for that.
+
+---
+
+## How It Works
 
 ```text
 Agent -> MCP stdio -> Event Log -> Read Models -> Context Graph -> Public-Safe Views
@@ -59,6 +63,8 @@ The event log is the sole source of truth. The context graph, task timeline, mai
 against the same project, who need to know — later, and provably — exactly
 what each agent did and why. Not for building a single chatty assistant with
 a good long-term memory; plenty of tools already do that well.
+
+---
 
 ## Core Features
 
