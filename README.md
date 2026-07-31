@@ -2,7 +2,7 @@
 
 Meshlet is a verifiable event log and coordination substrate for multi-agent systems. Instead of giving one agent a fuzzy memory of past chats, it gives a system of agents a durable, hash-chained record of what happened, who did it, and what's safe to share outside the local machine — with no vector database, embedding model, or cloud service involved.
 
-![Meshlet Demo — Prove It, Don't Promise It](docs/demo.gif)
+![Meshlet Demo — Prove It, Don't Promise It](demo.gif)
 
 `v0.4` focuses on a public-safe local runtime: SQLite local storage, visibility-aware event log, compact public exports, OKF markdown projections, and local agent mailboxes.
 
