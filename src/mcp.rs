@@ -220,11 +220,48 @@ fn mcp_tool_call(meshlet: &Meshlet, params: &Value, profile: SafetyProfile) -> R
             }
             meshlet.context_snapshot_limited(limit_arg(&args)?)?
         }
+        "meshlet_handoff" => {
+            if profile == SafetyProfile::PublicSafe {
+                bail!("meshlet_handoff is disabled in public-safe profile");
+            }
+            meshlet.handoff_agent(
+                str_field(&args, "from")?,
+                str_field(&args, "to")?,
+                str_field(&args, "summary")?,
+                optional_string_field(&args, "task_id")?,
+                optional_string_field(&args, "title")?,
+                optional_string_field(&args, "status")?,
+                optional_string_field(&args, "body")?,
+                optional_string_field(&args, "visibility")?
+                    .map(str::parse::<EventVisibility>)
+                    .transpose()?
+                    .unwrap_or(EventVisibility::Private),
+                profile,
+            )?
+        }
         other => bail!("unknown tool: {other}"),
     };
     Ok(json!({
-        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload)? }]
+        "content": [{ "type": "text", "text": format_mcp_tool_text(&payload)? }]
     }))
+}
+
+const MAX_MCP_TEXT_BYTES: usize = 16 * 1024;
+
+fn format_mcp_tool_text(payload: &Value) -> Result<String> {
+    let text = serde_json::to_string(payload)?;
+    if text.len() > MAX_MCP_TEXT_BYTES {
+        let truncated_text: String = text.chars().take(MAX_MCP_TEXT_BYTES).collect();
+        let wrapper = json!({
+            "_truncated": true,
+            "_original_bytes": text.len(),
+            "_max_bytes": MAX_MCP_TEXT_BYTES,
+            "partial_content": truncated_text,
+        });
+        Ok(serde_json::to_string(&wrapper)?)
+    } else {
+        Ok(text)
+    }
 }
 
 fn mcp_read_resource(meshlet: &Meshlet, uri: &str, profile: SafetyProfile) -> Result<Value> {
@@ -342,6 +379,24 @@ fn mcp_tools() -> Value {
                     "task_id": { "type": "string" },
                     "body": { "type": "string" },
                     "reply_to": { "type": "string" },
+                    "visibility": { "type": "string", "enum": ["private", "local", "public"] }
+                },
+                "required": ["from", "to", "summary"]
+            }
+        },
+        {
+            "name": "meshlet_handoff",
+            "description": "Atomic handoff from Agent A to Agent B: creates/updates task assignment and sends mailbox message in a single verifiable event transaction.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string" },
+                    "to": { "type": "string" },
+                    "summary": { "type": "string" },
+                    "task_id": { "type": "string" },
+                    "title": { "type": "string" },
+                    "status": { "type": "string", "enum": ["open", "in_progress", "blocked", "done", "canceled"] },
+                    "body": { "type": "string" },
                     "visibility": { "type": "string", "enum": ["private", "local", "public"] }
                 },
                 "required": ["from", "to", "summary"]
@@ -1096,6 +1151,55 @@ description = "Review Rust code through resources."
 
         assert_eq!(missing_type["error"]["code"], -32602);
         assert_eq!(missing_payload["error"]["code"], -32602);
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_tool_call_meshlet_handoff_executes_atomically() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+
+        let response = mcp_request(
+            &meshlet,
+            "tools/call",
+            json!({
+                "name": "meshlet_handoff",
+                "arguments": {
+                    "from": "agent:planner",
+                    "to": "agent:coder",
+                    "summary": "Implement auth middleware",
+                    "task_id": "task-42",
+                    "title": "Refactor auth middleware",
+                    "status": "in_progress",
+                    "body": "Detailed spec in README"
+                }
+            }),
+        );
+
+        let content_str = mcp_content_text(&response);
+        let content_val: Value = serde_json::from_str(content_str)?;
+
+        assert_eq!(content_val["status"], "handed_off");
+        assert_eq!(content_val["from"], "agent:planner");
+        assert_eq!(content_val["to"], "agent:coder");
+
+        let task = meshlet.show_task("task-42")?;
+        assert_eq!(task["assignee"], "agent:coder");
+        assert_eq!(task["status"], "in_progress");
+
+        assert!(meshlet.verify_event_chain()?.ok);
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_tool_text_truncates_large_payload() -> Result<()> {
+        let large_string = "a".repeat(20 * 1024);
+        let payload = json!({ "data": large_string });
+        let text = format_mcp_tool_text(&payload)?;
+        let val: Value = serde_json::from_str(&text)?;
+
+        assert_eq!(val["_truncated"], true);
+        assert_eq!(val["_max_bytes"], MAX_MCP_TEXT_BYTES);
         Ok(())
     }
 }

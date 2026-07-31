@@ -84,6 +84,26 @@ enum Command {
         #[command(subcommand)]
         command: MailboxCommand,
     },
+    Handoff {
+        #[arg(long = "from")]
+        from_agent: String,
+        #[arg(long = "to")]
+        to_agent: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long, default_value = "private")]
+        visibility: String,
+        #[arg(long, default_value = "local-trusted")]
+        profile: String,
+    },
     Evidence {
         #[command(subcommand)]
         command: EvidenceCommand,
@@ -615,6 +635,31 @@ fn main() -> Result<()> {
                     parse_safety_profile_arg(&profile)?,
                 )?)?,
             }
+        }
+        Command::Handoff {
+            from_agent,
+            to_agent,
+            summary,
+            task_id,
+            title,
+            status,
+            body,
+            visibility,
+            profile,
+        } => {
+            let root = find_project_root()?;
+            let meshlet = Meshlet::open(&root)?;
+            print_json(&meshlet.handoff_agent(
+                &from_agent,
+                &to_agent,
+                &summary,
+                task_id.as_deref(),
+                title.as_deref(),
+                status.as_deref(),
+                body.as_deref(),
+                parse_visibility_arg(&visibility)?,
+                parse_safety_profile_arg(&profile)?,
+            )?)?;
         }
         Command::Evidence { command } => {
             let root = find_project_root()?;

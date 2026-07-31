@@ -36,6 +36,65 @@ impl Meshlet {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn handoff_agent(
+        &self,
+        from_agent: &str,
+        to_agent: &str,
+        summary: &str,
+        task_id: Option<&str>,
+        title: Option<&str>,
+        task_status: Option<&str>,
+        body: Option<&str>,
+        visibility: EventVisibility,
+        profile: SafetyProfile,
+    ) -> Result<Value> {
+        if from_agent.trim().is_empty() {
+            bail!("from agent must not be empty");
+        }
+        if to_agent.trim().is_empty() {
+            bail!("to agent must not be empty");
+        }
+        if summary.trim().is_empty() {
+            bail!("summary must not be empty");
+        }
+
+        let mut task_event = None;
+        if let Some(tid) = task_id {
+            if self.task_exists(tid)? {
+                let updated =
+                    self.update_task(tid, task_status, Some(to_agent), None, visibility, profile)?;
+                task_event = Some(updated);
+            } else if let Some(t_title) = title {
+                let created = self.create_task(
+                    Some(tid),
+                    t_title,
+                    task_status,
+                    Some(to_agent),
+                    None,
+                    visibility,
+                    profile,
+                )?;
+                task_event = Some(created);
+            }
+        }
+
+        let message_event = self.send_agent_message(
+            from_agent, to_agent, summary, task_id, body, None, visibility, profile,
+        )?;
+
+        Ok(json!({
+            "status": "handed_off",
+            "from": from_agent,
+            "to": to_agent,
+            "summary": summary,
+            "task_id": task_id,
+            "message_event_id": message_event.id,
+            "message_hash": message_event.hash,
+            "task_event_id": task_event.as_ref().map(|e| &e.id),
+        }))
+    }
+
     pub fn list_mailbox(
         &self,
         agent: &str,
@@ -286,6 +345,39 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert!(items.iter().all(|item| item["visibility"] == "public"));
         assert!(items.iter().all(|item| item["type"] != "agent.message"));
+        Ok(())
+    }
+
+    #[test]
+    fn handoff_agent_creates_task_and_sends_message() -> Result<()> {
+        let dir = tempdir()?;
+        let meshlet = Meshlet::init(dir.path())?;
+        let result = meshlet.handoff_agent(
+            "agent:a",
+            "agent:b",
+            "Review auth refactor",
+            Some("task-99"),
+            Some("Auth refactor"),
+            Some("in_progress"),
+            Some("Please review security bounds"),
+            EventVisibility::Private,
+            SafetyProfile::LocalTrusted,
+        )?;
+
+        assert_eq!(result["status"], "handed_off");
+        assert_eq!(result["from"], "agent:a");
+        assert_eq!(result["to"], "agent:b");
+
+        let task = meshlet.show_task("task-99")?;
+        assert_eq!(task["assignee"], "agent:b");
+        assert_eq!(task["status"], "in_progress");
+
+        let inbox = meshlet.list_mailbox("agent:b", "inbox", 10, SafetyProfile::LocalTrusted)?;
+        assert_eq!(
+            inbox["messages"]["items"][0]["summary"],
+            "Review auth refactor"
+        );
+        assert_eq!(meshlet.verify_event_chain()?.ok, true);
         Ok(())
     }
 }
