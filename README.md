@@ -1,109 +1,130 @@
 # Meshlet
 
-Meshlet is a local-first context mesh for agent workflows. It gives agents a durable event log, a rebuildable context graph, a skill registry, and a small MCP stdio surface without adding a cloud service, dashboard, marketplace, vector database, or model runtime.
+Meshlet is a local-first context mesh for agent workflows. It provides agents with a durable event log, a rebuildable context graph, a skill registry, and an MCP stdio surface—without adding cloud dependencies, external dashboards, marketplaces, vector databases, or hosted AI models.
 
-v0.4 focuses on a public-safe local runtime: SQLite storage, visibility-aware events, compact public exports, OKF markdown bundles, and a local agent mailbox.
+`v0.4` focuses on a public-safe local runtime: SQLite local storage, visibility-aware event log, compact public exports, OKF markdown projections, and local agent mailboxes.
+
+---
 
 ## Why It Exists
 
-Agent sessions are often transient, but useful working context is not. Meshlet keeps that context in a local, inspectable, append-only system:
+Agent sessions are frequently transient, but valuable engineering context is not. Meshlet retains structured working context in a local, inspectable, append-only system:
 
 ```text
 Agent -> MCP stdio -> Event Log -> Read Models -> Context Graph -> Public-Safe Views
 ```
 
-The event log is the source of truth. Graph, task, mailbox, timeline, evidence, and search views are materialized from events and can be rebuilt.
+The event log is the sole source of truth. The context graph, task timeline, mailbox, evidence registry, and search indexes are materialized read models that can be rebuilt on demand.
+
+---
 
 ## Current Status
 
-- Package version: `0.4.0`
-- Current target: private `v0.4.1` adoption hardening
-- Runtime: local CLI + MCP stdio
-- Storage: SQLite under `.meshlet/`
-- Safety model: `private`, `local`, and `public` event visibility
-- Release state: public `v0.4.0` tag/release is intentionally skipped while the repository is private and GitHub Actions is blocked before runner startup
+- **Package Version**: `0.4.0`
+- **Runtime**: Local CLI + MCP stdio server
+- **Storage**: SQLite local database (`.meshlet/`)
+- **Safety Levels**: `private`, `local`, and `public` event visibilities
 
-## Features
+---
 
-- Append-only event log with hash-chain verification.
-- Visibility-aware public-safe query, digest, export, and MCP read paths.
-- SQLite-backed read models for contexts, graph nodes/edges, skills, tasks, evidence, mailbox messages, and task timelines.
-- FTS-backed deterministic query over compact safe fields.
-- Graphify graph import with namespaces.
-- Skill manifest registration with declared permissions.
-- Evidence SHA-256 attach and verify helpers.
-- Evidence metadata retrieval by SHA-256 without printing file contents.
-- MCP stdio server with typed tools/resources and structured JSON-RPC errors.
-- Public-safe JSON export and OKF markdown export.
-- Adoption commands for project-local Meshlet/Codex setup.
-- `doctor public` checks before sharing public state.
+## Core Features
+
+- **Append-Only Event Log**: Hash-chain verification for tamper-evident event storage.
+- **Context Graph**: Materialized graph nodes and edges rebuildable from context events.
+- **MCP Stdio Server**: Protocol-compliant JSON-RPC tools and resources for AI coding agents.
+- **Skill Registry**: Register and inspect structured skill manifests with declared permissions.
+- **Agent Workflows**: Built-in support for agent tasks, mailbox messaging, evidence SHA-256 digests, and task timelines.
+- **Public-Safe Sharing & Exports**: Compact public JSON and OKF (Open Knowledge Format) markdown exports.
+- **Safety Checks**: Built-in `doctor public` command to verify sanitization before sharing exports.
+- **Project Adoption**: Command-line tools (`agent install codex`, `init --adopt`, `refresh`) for local agent environment integration.
+
+---
 
 ## Quick Start
 
-Requirements: Rust `1.85` or newer. Install Rust from <https://rustup.rs>.
-See `docs/INSTALL.md` for maintainer workflow, local state, and install notes.
+### Requirements
+- Rust `1.85` or newer (install via [rustup.rs](https://rustup.rs))
+
+### Build & Run
 
 ```bash
-cargo build
+# Build binary
+cargo build --release
+
+# Initialize local Meshlet environment
 cargo run -- init
+
+# Check runtime status
 cargo run -- status
 ```
 
-Append and inspect a context event:
+### Append & Verify Events
 
 ```bash
-cargo run -- event append --type context.added --json '{"label":"repo context"}'
+# Append a context event
+cargo run -- event append --type context.added --json '{"label":"repository architecture"}'
+
+# List events
 cargo run -- event list
+
+# Verify hash-chain integrity
 cargo run -- verify
 ```
 
-Run a compact query:
+### Query Context
 
 ```bash
-cargo run -- query "repo context" --kind all --limit 20 --mode compact
+# Perform a compact deterministic query
+cargo run -- query "architecture" --kind all --limit 20 --mode compact
 ```
 
-## Common Commands
+---
+
+## Command Reference
 
 | Command | Purpose |
 |---|---|
-| `cargo run -- init` | Create local `.meshlet/` state. |
-| `cargo run -- init --adopt` | Adopt the current repo with config, OKF skeleton, `.gitignore`, and AGENTS guidance. |
-| `cargo run -- status` | Show local runtime status. |
-| `cargo run -- verify` | Verify event hash-chain integrity. |
-| `cargo run -- refresh --graphify --okf` | Refresh configured Graphify import and OKF projection. |
-| `cargo run -- agent install codex` | Patch project `AGENTS.md` and print Codex MCP setup guidance. |
-| `cargo run -- agent install codex --patch` | Patch safe project-local `.codex/config.toml` with Meshlet MCP config. |
-| `cargo run -- agent show codex` | Show detected Meshlet/Codex project setup. |
-| `cargo run -- event list` | List events. |
-| `cargo run -- query "term" --kind all --limit 20 --mode compact` | Search compact local context. |
-| `cargo run -- graph import <graph.json> --source graphify --namespace graphify:repo` | Import a namespaced Graphify graph. |
-| `cargo run -- skill add ./skill.toml` | Register a skill manifest. |
-| `cargo run -- task create --task-id task-1 --title "Ship mailbox"` | Create a typed task event. |
-| `cargo run -- mailbox send --from agent:a --to agent:b --summary "Please handle task-1" --task-id task-1` | Send an agent mailbox message. |
-| `cargo run -- evidence attach --path src/lib.rs --sha256 auto` | Attach evidence with a SHA-256 digest. |
-| `cargo run -- evidence retrieve <sha256>` | Retrieve evidence metadata by SHA-256. |
-| `cargo run -- doctor public` | Check whether public sharing is safe. |
-| `cargo run -- export public --out /tmp/meshlet-public.json` | Write a compact public JSON bundle. |
-| `cargo run -- export public --format okf --out /tmp/meshlet-okf` | Write a public-safe OKF markdown bundle. |
-| `cargo run -- serve --mcp stdio --profile public-safe` | Start MCP stdio in public-safe mode. |
+| `cargo run -- init` | Initialize local `.meshlet/` runtime state |
+| `cargo run -- init --adopt` | Adopt repo with local config, OKF skeleton, and ignore rules |
+| `cargo run -- status` | Show local Meshlet status and database metrics |
+| `cargo run -- verify` | Verify event hash-chain integrity |
+| `cargo run -- refresh --graphify --okf` | Refresh Graphify import and OKF markdown projections |
+| `cargo run -- agent install codex --patch` | Patch local `.codex/config.toml` with Meshlet MCP stdio configuration |
+| `cargo run -- agent show codex` | Show detected Meshlet & Codex environment status |
+| `cargo run -- event list` | List recorded events |
+| `cargo run -- query "term" --kind all --limit 20 --mode compact` | Search local context models |
+| `cargo run -- graph import <graph.json> --source graphify --namespace graphify:repo` | Import a namespaced Graphify graph |
+| `cargo run -- skill add ./skill.toml` | Register a skill manifest |
+| `cargo run -- task create --task-id task-1 --title "Context refactor"` | Create a typed task event |
+| `cargo run -- mailbox send --from agent:a --to agent:b --summary "Task ready" --task-id task-1` | Send an agent mailbox message |
+| `cargo run -- evidence attach --path src/lib.rs --sha256 auto` | Attach evidence with SHA-256 digest |
+| `cargo run -- evidence retrieve <sha256>` | Retrieve evidence metadata by hash |
+| `cargo run -- doctor public` | Check whether public sharing is safe |
+| `cargo run -- export public --out /tmp/meshlet-public.json` | Write a compact public JSON bundle |
+| `cargo run -- export public --format okf --out /tmp/meshlet-okf` | Write a public-safe OKF markdown bundle |
+| `cargo run -- serve --mcp stdio --profile public-safe` | Start MCP stdio server in public-safe mode |
 
-## Public-Safe Sharing
+---
 
-Meshlet is local-first, but it can publish sanitized public state. Public-safe paths only expose compact public data and reject mutation tools in public-safe MCP mode.
+## Public-Safe Sharing & Security
 
-Before sharing anything:
+Meshlet is designed to be local-first while allowing safe, sanitized sharing when needed:
+- Public-safe export commands reject private/local payload keys and sensitive attributes.
+- In `public-safe` MCP mode, mutation tools are blocked automatically.
+- Local database state (`.meshlet/`), SQLite files, private evidence, and exports are ignored by `.gitignore` and should never be committed to source control.
+
+Before publishing or sharing exports, run:
 
 ```bash
 cargo run -- doctor public
 cargo run -- export public --out /tmp/meshlet-public.json
-cargo run -- export public --format okf --out /tmp/meshlet-okf
-cargo run -- okf doctor /tmp/meshlet-okf
 ```
 
-Local runtime state, SQLite files, logs, private evidence, and generated exports must stay out of git.
+---
 
-## Verification
+## Development & Verification
+
+Run standard verification commands before pushing or releasing:
 
 ```bash
 cargo fmt --check
@@ -112,53 +133,8 @@ cargo build --locked
 cargo test --locked
 ```
 
-Local maintainers in this repository run the same gates through `rtk`; see `docs/INSTALL.md`.
-
-## v0.4 Scope
-
-- Event log as source of truth.
-- Context graph as a rebuildable materialized view.
-- SQLite local storage.
-- CLI for local operation.
-- MCP stdio tools/resources.
-- Skill registry with explicit manifests and permissions.
-- Visibility-aware public-safe read/export paths.
-- Agent task, evidence, mailbox, and timeline workflows.
-
-## Non-Goals
-
-These are intentionally out of scope for v0.4:
-
-- Cloud sync.
-- Web dashboard.
-- Marketplace.
-- A2A adapter.
-- Auth/team mode.
-- Vector database.
-- AI summarizer or hosted model integration.
-
-## Documentation
-
-- `docs/INSTALL.md` - build, run, install, and local-state notes.
-- `docs/EVENT_SCHEMA.md` - event envelope, event types, payload rules, and read-model derivation.
-- `docs/PUBLIC_SAFE_CONTRACT.md` - public-safe read/export/MCP contract.
-- `docs/SCOPE.md` - phase boundaries.
-- `docs/PROGRESS.md` - current state and next tasks.
-- `docs/MCP_POLICY.md` - MCP behavior rules.
-- `docs/SKILL_POLICY.md` - skill manifest and permission rules.
-- `docs/SECURITY_POLICY.md` - local safety rules.
-- `docs/GRAPH_POLICY.md` - event/graph/Graphify rules.
-- `docs/OKF_POLICY.md` - OKF export and doctor rules.
-- `docs/RELEASE_CHECKLIST.md` - v0.4 release smoke checklist.
-- `docs/GITHUB_PUBLICATION.md` - repository About text and publication hygiene notes.
-- `docs/PRODUCT_HANDOFF.md` - product direction and phased roadmap.
-
-## Security Notes
-
-Event hashes include event visibility. If `verify` fails on a pre-hardening local DB, treat it as legacy local state and export any needed public data before creating fresh `.meshlet/` state.
-
-Meshlet rejects secret-like payload keys and public-safe secret-looking values, but the safest workflow is still to keep private/local runtime state outside version control and run `doctor public` before sharing exports.
+---
 
 ## License
 
-MIT.
+[MIT](LICENSE)

@@ -792,4 +792,3 @@ fn context_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
             .unwrap_or_else(|| json!({})),
     }))
 }
-

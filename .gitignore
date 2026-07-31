@@ -72,7 +72,7 @@ graphify-out/
 
 # Docs and test temporary
 docs/
-test/
+tests/
 
 # GIT Safety and Security
 CONTRIBUTING.md

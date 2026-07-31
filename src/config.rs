@@ -978,6 +978,31 @@ refresh_on_task_done = false
     }
 
     #[test]
+    fn codex_agent_show_reports_project_local_setup_contract() -> Result<()> {
+        let dir = tempdir()?;
+        let options = AdoptOptions::new("codex", ".meshlet-okf", "graphify-out", true);
+        init_and_adopt(dir.path(), &options)?;
+        install_codex_agent(dir.path(), &CodexAgentInstallOptions::default())?;
+
+        let report = show_codex_agent(dir.path())?;
+        let value = serde_json::to_value(&report)?;
+
+        assert_eq!(value["agent"], "codex");
+        assert_eq!(value["agents_md_section_present"], true);
+        assert_eq!(value["meshlet_toml_present"], true);
+        assert_eq!(value["meshlet_db_present"], true);
+        assert_eq!(value["okf_out_dir"], ".meshlet-okf");
+        assert_eq!(value["okf_out_dir_present"], true);
+        assert!(
+            value["mcp_command_snippet"]
+                .as_str()
+                .expect("mcp snippet")
+                .contains("command = \"meshlet\"")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn codex_agent_patch_config_is_idempotent_and_backed_up() -> Result<()> {
         let dir = tempdir()?;
         let codex_dir = dir.path().join(CODEX_DIR);

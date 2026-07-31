@@ -493,7 +493,6 @@ fn clamp_limit(limit: u32) -> u32 {
     limit.clamp(1, MAX_LIMIT)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,44 +990,49 @@ description = "Review Rust code through resources."
     fn mcp_public_safe_rejects_mutation_and_full_output() -> Result<()> {
         let dir = tempdir()?;
         let meshlet = Meshlet::init(dir.path())?;
-        let publish = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
+
+        for (index, params) in [
+            json!({
                 "name": "meshlet_publish_event",
                 "arguments": {
                     "type": "context.added",
                     "visibility": "public",
                     "payload": { "label": "public" }
                 }
-            }
-        });
-        let full_query = json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": "meshlet_query",
-                "arguments": { "q": "repo", "mode": "full" }
-            }
-        });
+            }),
+            json!({
+                "name": "meshlet_create_task",
+                "arguments": { "title": "public task", "visibility": "public" }
+            }),
+            json!({
+                "name": "meshlet_update_task",
+                "arguments": { "id": "task-1", "status": "done" }
+            }),
+            json!({
+                "name": "meshlet_send_message",
+                "arguments": { "from": "agent:a", "to": "agent:b", "summary": "blocked" }
+            }),
+            json!({ "name": "meshlet_get_context", "arguments": {} }),
+            json!({ "name": "meshlet_query", "arguments": { "q": "repo", "mode": "full" } }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request = json!({
+                "jsonrpc": "2.0",
+                "id": index + 1,
+                "method": "tools/call",
+                "params": params
+            });
+            let response = handle_mcp_request_with_profile(
+                &meshlet,
+                &request,
+                json!(index + 1),
+                SafetyProfile::PublicSafe,
+            );
 
-        let publish_response = handle_mcp_request_with_profile(
-            &meshlet,
-            &publish,
-            json!(1),
-            SafetyProfile::PublicSafe,
-        );
-        let query_response = handle_mcp_request_with_profile(
-            &meshlet,
-            &full_query,
-            json!(2),
-            SafetyProfile::PublicSafe,
-        );
-
-        assert_eq!(publish_response["error"]["code"], -32602);
-        assert_eq!(query_response["error"]["code"], -32602);
+            assert_eq!(response["error"]["code"], -32602);
+        }
         Ok(())
     }
 
