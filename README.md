@@ -1,14 +1,43 @@
 # Meshlet
 
-Meshlet is a local-first context mesh for agent workflows. It provides agents with a durable event log, a rebuildable context graph, a skill registry, and an MCP stdio surface—without adding cloud dependencies, external dashboards, marketplaces, vector databases, or hosted AI models.
+Meshlet is a verifiable event log and coordination substrate for multi-agent systems. Instead of giving one agent a fuzzy memory of past chats, it gives a system of agents a durable, hash-chained record of what happened, who did it, and what's safe to share outside the local machine — with no vector database, embedding model, or cloud service involved.
 
 `v0.4` focuses on a public-safe local runtime: SQLite local storage, visibility-aware event log, compact public exports, OKF markdown projections, and local agent mailboxes.
 
 ---
 
-## Why It Exists
+## Why Not Just Use a Memory MCP Server?
 
-Agent sessions are frequently transient, but valuable engineering context is not. Meshlet retains structured working context in a local, inspectable, append-only system:
+[#why-not-just-use-a-memory-mcp-server](#why-not-just-use-a-memory-mcp-server)
+
+Most MCP memory servers solve one problem: help a single agent recall facts
+across sessions, usually through vector embeddings and semantic search.
+Meshlet solves a different problem: give a *system of agents* a durable,
+tamper-evident record of what happened, who did it, and what's safe to expose
+outside the local machine.
+
+There is no vector database and no embedding model here, by design. Every
+event is appended to a hash-chained log, so `meshlet verify` can prove the
+history hasn't been altered — something semantic-recall memory stores aren't
+built to do. Graph, task, mailbox, and timeline views are just materialized
+read models over that log, and can be rebuilt at any time.
+
+| | Typical memory MCP server | meshlet |
+|---|---|---|
+| Core primitive | Vector embeddings + semantic search | Append-only event log + hash chain |
+| Answers | "What do I know about X?" | "What happened, in what order, can I prove it?" |
+| Storage | Vector DB (Qdrant, LanceDB, etc.) | SQLite only |
+| Multi-agent coordination | Rare, usually bolted on | Core primitive (typed tasks, mailbox) |
+| Data governance | Often all-or-nothing | Per-event `private` / `local` / `public` visibility |
+| External sharing | Not typically a design goal | `doctor public` + sanitized export built in |
+| Permissions | Rare | Skill manifests with declared permissions |
+| Integrity guarantee | None typical | Hash-chain verification (`verify`) |
+
+If you want an agent that remembers your coding preferences, a vector-memory
+MCP server is probably the right tool. If you want multiple agents
+coordinating through typed tasks and mailbox messages, with an audit trail
+you can verify and a clear boundary between private, local, and public data,
+meshlet is built for that.
 
 ```text
 Agent -> MCP stdio -> Event Log -> Read Models -> Context Graph -> Public-Safe Views
@@ -26,6 +55,11 @@ The event log is the sole source of truth. The context graph, task timeline, mai
 - **Safety Levels**: `private`, `local`, and `public` event visibilities
 
 ---
+
+**Who this is for:** teams or solo builders running more than one agent
+against the same project, who need to know — later, and provably — exactly
+what each agent did and why. Not for building a single chatty assistant with
+a good long-term memory; plenty of tools already do that well.
 
 ## Core Features
 
