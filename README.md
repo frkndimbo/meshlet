@@ -8,7 +8,6 @@ Meshlet is a verifiable event log and coordination substrate for multi-agent sys
 
 ## Why Not Just Use a Memory MCP Server?
 
-[#why-not-just-use-a-memory-mcp-server]
 
 Most MCP memory servers solve one problem: help a single agent recall facts
 across sessions, usually through vector embeddings and semantic search.
